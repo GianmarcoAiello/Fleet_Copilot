@@ -152,6 +152,13 @@ class Repository:
     def __init__(self, db_path: str | os.PathLike):
         self.con = duckdb.connect(str(db_path), read_only=False)
 
+    @classmethod
+    def _open_readonly(cls, db_path: str | os.PathLike) -> "Repository":
+        """Read-only handle that coexists with an external writer's lock."""
+        obj = cls.__new__(cls)
+        obj.con = duckdb.connect(str(db_path), read_only=True)
+        return obj
+
     # ── reads (tenant-scoped) ────────────────────────────────────────────
     def latest_snapshots(self, tenant_id: str, filters: str = "", params: tuple = ()) -> list[dict]:
         rows = self.con.execute(
