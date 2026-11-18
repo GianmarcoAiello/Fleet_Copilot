@@ -41,7 +41,7 @@ def get_llm(temperature: float = 0.0):
     """BYOK via langchain init_chat_model. Provider/model/keys come from env:
     FLEET_LLM_MODEL (e.g. 'google:gemini-flash-lite-latest') + the provider's
     standard key var (GOOGLE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)."""
-    model = os.environ.get("FLEET_LLM_MODEL", "google:gemini-flash-lite-latest")
+    model = os.environ.get("FLEET_LLM_MODEL", "google_genai:gemini-flash-lite-latest")
     return init_chat_model(model, temperature=temperature)
 
 
@@ -62,6 +62,11 @@ def analyst(state: AgentState) -> dict:
     messages: list[AnyMessage] = state["messages"]
     if len(messages) == 1:
         messages = messages + [SystemMessage(content=ANALYST_SYSTEM)]
+    # Gemini rejects requests ending on a tool/model turn; close the turn as user.
+    if messages and not isinstance(messages[-1], HumanMessage):
+        messages = messages + [HumanMessage(
+            content="Continue: use the tool results above, or call more tools, "
+                    "then write your grounded answer with citations.")]
     iteration = state.get("iteration", 0)
     out = llm.invoke(messages)
     return {"messages": messages + [out], "iteration": iteration + 1}
