@@ -189,7 +189,7 @@ def formatter(state: AgentState) -> dict:
     return {"response": "\n\n".join(parts)}
 
 
-def build_workflow(repo):
+def build_workflow(repo, checkpointer=None):
     """Compile the StateGraph. `repo` must be set before invocation."""
     from langgraph.graph import END, StateGraph
     set_repo(repo)
@@ -210,4 +210,4 @@ def build_workflow(repo):
                              "re_analyze": "analyst"})
     g.add_edge("hitl", "formatter")
     g.add_edge("formatter", END)
-    return g.compile()
+    return g.compile(checkpointer=checkpointer)
