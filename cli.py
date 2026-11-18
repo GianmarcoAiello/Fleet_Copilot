@@ -91,7 +91,8 @@ def main() -> None:
                 break
             if not q:
                 continue
-        tenant = pick_tenant(tenant) if not args.query and not queries else tenant
+        if not queries and n == 0 and not args.query:
+            tenant = pick_tenant(tenant)
         thread = {"configurable": {"thread_id": f"cli-{n}", "tenant_id": tenant}}
         try:
             state = wf.invoke({"query": q, "tenant_id": tenant}, config=thread)

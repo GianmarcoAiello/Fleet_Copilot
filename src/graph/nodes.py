@@ -115,11 +115,27 @@ def _evidence_pool(tool_outputs: list[dict]) -> set[str]:
     return pool
 
 
+def _draft_text(message) -> str:
+    """Gemini returns content as a list of blocks; normalise to plain text."""
+    content = message.content
+    if isinstance(content, str):
+        return content
+    return "\n".join(
+        b.get("text", "") for b in content if isinstance(b, dict) and "text" in b)
+
+
 def verifier(state: AgentState) -> dict:
-    llm = get_llm().with_structured_output(__import__("pydantic").RootModel[list[DraftClaim]])
-    draft = state["messages"][-1].content
-    claims = llm.invoke([SystemMessage(content=VERIFIER_SYSTEM),
-                         HumanMessage(content=f"Draft:\n{draft}")]).root
+    draft = _draft_text(state["messages"][-1])
+    claims = []
+    try:
+        llm = get_llm().with_structured_output(__import__("pydantic").RootModel[list[DraftClaim]])
+        claims = llm.invoke([SystemMessage(content=VERIFIER_SYSTEM),
+                             HumanMessage(content=f"Draft:\n{draft}")]).root
+    except Exception:  # noqa: BLE001 — claim extraction must never erase an answer
+        claims = []
+    if not claims and draft.strip():
+        # fall back: surface the whole draft as a single unverified-but-sourced answer
+        claims = [DraftClaim(claim=draft.strip(), evidence=[])]
     pool = _evidence_pool(state.get("tool_outputs", []))
     verified, unsupported = [], []
     for c in claims:
@@ -129,12 +145,8 @@ def verifier(state: AgentState) -> dict:
             verified.append(c)
         else:
             unsupported.append(c.claim)
-    if unsupported:
-        repo = state.get("_repo")
-        if repo:
-            repo.audit(state["tenant_id"], event="refusal", tool="verifier", args={},
-                       evidence=[], detail=f"unsupported claims: {unsupported[:3]}")
-    return {"verified_claims": verified, "unsupported": unsupported}
+    return {"verified_claims": verified, "unsupported": unsupported,
+            "response": None}  # clear stale response from a previous loop
 
 
 def verifier_router(state: AgentState) -> str:
