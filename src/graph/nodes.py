@@ -107,10 +107,10 @@ def analyst_router(state: AgentState) -> str:
 def _evidence_pool(tool_outputs: list[dict]) -> set[str]:
     pool = set()
     for out in tool_outputs:
-        pool.update(str(out["args"].get("device_id", "")))
+        pool.add(str(out["args"].get("device_id", "")))
         text = str(out["result"])
         import re
-        pool.update(re.findall(r"[A-Z0-9]{11}", text))       # serial-shaped ids
+        pool.update(re.findall(r"\b[A-Z0-9]{10,14}\b", text))  # device/serial-shaped ids
         pool.update(re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", text))
     return pool
 
@@ -124,7 +124,7 @@ def verifier(state: AgentState) -> dict:
     verified, unsupported = [], []
     for c in claims:
         ids = {e.device_id for e in c.evidence} | set(
-            __import__("re").findall(r"[A-Z0-9]{11}", c.claim))
+            __import__("re").findall(r"\b[A-Z0-9]{10,14}\b", c.claim))
         if not ids or ids.issubset(pool):
             verified.append(c)
         else:
