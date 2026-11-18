@@ -1,0 +1,338 @@
+"""NDJSON telemetry -> DuckDB repository with tenant-scoped views and audit log.
+
+One DuckDB file holds everything: normalized telemetry tables, derived trend
+views, the action registry, and the append-only audit log. Tenant isolation
+happens at this boundary: every read/write helper takes tenant_id and appends
+`company_id = ?` — the LLM never composes the WHERE clause.
+"""
+from __future__ import annotations
+
+import json
+import os
+import time
+import uuid
+from pathlib import Path
+
+import duckdb
+
+# ── schema ──────────────────────────────────────────────────────────────────
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS snapshots (
+    snapshot_id      VARCHAR,        -- deterministic: device_id|collected_at
+    device_id        VARCHAR,
+    company_id       VARCHAR,
+    employee_id      VARCHAR,
+    collected_at     TIMESTAMP,
+    agent_version    VARCHAR,
+    os_platform      VARCHAR,
+    os_product       VARCHAR,
+    os_version       VARCHAR,
+    os_arch          VARCHAR,
+    model_name       VARCHAR,
+    serial_number    VARCHAR,
+    processor        VARCHAR,
+    ram_total_bytes  BIGINT,
+    ram_used_bytes   BIGINT
+);
+CREATE TABLE IF NOT EXISTS disk_volumes (
+    snapshot_id    VARCHAR,
+    device_id      VARCHAR,
+    company_id     VARCHAR,
+    volume_name    VARCHAR,
+    file_system    VARCHAR,
+    total_bytes    BIGINT,
+    available_bytes BIGINT
+);
+CREATE TABLE IF NOT EXISTS battery (
+    snapshot_id        VARCHAR,
+    device_id          VARCHAR,
+    company_id         VARCHAR,
+    battery_present    BOOLEAN,
+    percentage         INTEGER,
+    condition          VARCHAR,
+    cycle_count        INTEGER,
+    full_charge_capacity INTEGER
+);
+CREATE TABLE IF NOT EXISTS compliance_results (
+    snapshot_id  VARCHAR,
+    device_id    VARCHAR,
+    company_id   VARCHAR,
+    check_id     VARCHAR,
+    status       VARCHAR,
+    severity     VARCHAR
+);
+CREATE TABLE IF NOT EXISTS installed_software (
+    snapshot_id  VARCHAR,
+    device_id    VARCHAR,
+    company_id   VARCHAR,
+    name         VARCHAR,
+    version      VARCHAR
+);
+CREATE TABLE IF NOT EXISTS actions (
+    action_id   VARCHAR PRIMARY KEY,
+    company_id  VARCHAR,
+    device_id   VARCHAR,
+    tool        VARCHAR,
+    args_json   VARCHAR,
+    status      VARCHAR,   -- proposed | approved | rejected | executed
+    created_at  TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+    audit_id     VARCHAR,
+    ts           TIMESTAMP,
+    tenant_id    VARCHAR,
+    approver     VARCHAR,
+    event        VARCHAR,  -- proposal | approval | rejection | refusal | execution
+    tool         VARCHAR,
+    args_json    VARCHAR,
+    evidence_json VARCHAR,
+    detail       VARCHAR
+);
+"""
+
+
+def _flat(r: dict) -> tuple[list, list, list, list, list]:
+    sid = f"{r['device_id']}|{r['collected_at']}"
+    ident = r.get("device_identity") or {}
+    mem = r.get("memory") or {}
+    os_ = r.get("os") or {}
+    snaps = [(
+        sid, r["device_id"], r["company_id"], r.get("employee_id"), r["collected_at"],
+        r.get("agent_version"), os_.get("platform"), os_.get("product_name"),
+        os_.get("product_version"), os_.get("architecture"), ident.get("model_name"),
+        ident.get("serial_number"), ident.get("processor"),
+        mem.get("total_memory_bytes"), mem.get("used_memory_bytes"),
+    )]
+    disks, bats, comps, softs = [], [], [], []
+    for v in r.get("disk_volumes") or []:
+        disks.append((sid, r["device_id"], r["company_id"], v.get("volume_name"),
+                      v.get("file_system"), v.get("total_bytes"), v.get("available_bytes")))
+    b = r.get("battery") or {}
+    bats.append((sid, r["device_id"], r["company_id"], b.get("battery_present"),
+                 b.get("percentage"), b.get("condition"), b.get("cycle_count"),
+                 b.get("full_charge_capacity")))
+    for c in r.get("compliance_results") or []:
+        comps.append((sid, r["device_id"], r["company_id"], c.get("check_id"),
+                      c.get("status"), c.get("severity")))
+    for s in r.get("installed_software") or []:
+        softs.append((sid, r["device_id"], r["company_id"], s.get("name"), s.get("version")))
+    return snaps, disks, bats, comps, softs
+
+
+def load_ndjson(db_path: str | os.PathLike, ndjson_path: str | os.PathLike) -> int:
+    """Load NDJSON into a fresh DuckDB file. Returns number of snapshots."""
+    Path(db_path).unlink(missing_ok=True)
+    con = duckdb.connect(str(db_path))
+    con.execute(SCHEMA)
+    snaps, disks, bats, comps, softs = [], [], [], [], []
+    with open(ndjson_path) as f:
+        for line in f:
+            s, d, b, c, w = _flat(json.loads(line))
+            snaps += s; disks += d; bats += b; comps += c; softs += w
+    con.executemany("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", snaps)
+    con.executemany("INSERT INTO disk_volumes VALUES (?,?,?,?,?,?,?)", disks)
+    con.executemany("INSERT INTO battery VALUES (?,?,?,?,?,?,?,?)", bats)
+    con.executemany("INSERT INTO compliance_results VALUES (?,?,?,?,?,?)", comps)
+    con.executemany("INSERT INTO installed_software VALUES (?,?,?,?,?)", softs)
+    n = con.execute("SELECT count(*) FROM snapshots").fetchone()[0]
+    con.close()
+    return n
+
+
+class Repository:
+    """Tenant-scoped access to telemetry + actions + audit log.
+
+    Tenant isolation contract: every method requires tenant_id and injects it
+    as a parameter, never as string interpolation. The LLM-facing tools call
+    these methods with the tenant_id taken from RunnableConfig — it is never a
+    model-controlled argument.
+    """
+
+    def __init__(self, db_path: str | os.PathLike):
+        self.con = duckdb.connect(str(db_path), read_only=False)
+
+    # ── reads (tenant-scoped) ────────────────────────────────────────────
+    def latest_snapshots(self, tenant_id: str, filters: str = "", params: tuple = ()) -> list[dict]:
+        rows = self.con.execute(
+            f"""
+            SELECT s.* FROM snapshots s
+            WHERE s.company_id = ?
+              AND s.collected_at = (SELECT max(collected_at) FROM snapshots w
+                                    WHERE w.device_id = s.device_id)
+              {"AND " + filters if filters else ""}
+            ORDER BY s.device_id
+            """,
+            (tenant_id, *params),
+        ).fetchall()
+        cols = [d[0] for d in self.con.description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def device_history(self, tenant_id: str, device_id: str, limit: int = 30) -> list[dict]:
+        rows = self.con.execute(
+            """
+            SELECT s.*, b.percentage, b.condition AS battery_condition,
+                   b.cycle_count, b.full_charge_capacity
+            FROM snapshots s LEFT JOIN battery b USING (snapshot_id)
+            WHERE s.company_id = ? AND s.device_id = ?
+            ORDER BY s.collected_at DESC LIMIT ?
+            """,
+            (tenant_id, device_id, limit),
+        ).fetchall()
+        cols = [d[0] for d in self.con.description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def compliance(self, tenant_id: str, status: str | None = None,
+                   severity: str | None = None) -> list[dict]:
+        clauses, params = ["c.company_id = ?"], [tenant_id]
+        if status:
+            clauses.append("c.status = ?"); params.append(status)
+        if severity:
+            clauses.append("c.severity = ?"); params.append(severity)
+        rows = self.con.execute(
+            f"""
+            SELECT c.check_id, c.status, c.severity, c.device_id, s.model_name,
+                   s.os_version, s.collected_at
+            FROM compliance_results c JOIN snapshots s USING (snapshot_id)
+            WHERE {' AND '.join(clauses)}
+            ORDER BY c.device_id, s.collected_at DESC
+            """,
+            params,
+        ).fetchall()
+        cols = [d[0] for d in self.con.description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def disk_trend(self, tenant_id: str) -> list[dict]:
+        rows = self.con.execute(
+            """
+            SELECT d.device_id, min(d.available_bytes)/1e9 AS min_avail_gb,
+                   (first(d.available_bytes ORDER BY s.collected_at)
+                    - last(d.available_bytes ORDER BY s.collected_at))/1e9 AS burned_gb,
+                   count(*) AS n
+            FROM disk_volumes d JOIN snapshots s USING (snapshot_id)
+            WHERE d.company_id = ?
+            GROUP BY d.device_id ORDER BY min_avail_gb ASC
+            """,
+            (tenant_id,),
+        ).fetchall()
+        cols = [d[0] for d in self.con.description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def battery_report(self, tenant_id: str) -> list[dict]:
+        rows = self.con.execute(
+            """
+            SELECT b.device_id,
+                   max(b.cycle_count) AS max_cycles,
+                   max_by(b.condition, s.collected_at) AS latest_condition,
+                   arg_min(b.full_charge_capacity, s.collected_at) AS capacity_start,
+                   arg_max(b.full_charge_capacity, s.collected_at) AS capacity_end
+            FROM battery b JOIN snapshots s USING (snapshot_id)
+            WHERE b.company_id = ? AND b.battery_present
+            GROUP BY b.device_id ORDER BY max_cycles DESC
+            """,
+            (tenant_id,),
+        ).fetchall()
+        cols = [d[0] for d in self.con.description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def ram_pressure(self, tenant_id: str) -> list[dict]:
+        rows = self.con.execute(
+            """
+            SELECT device_id, avg(ram_used_bytes::DOUBLE / ram_total_bytes) AS avg_pressure,
+                   max(ram_used_bytes::DOUBLE / ram_total_bytes) AS max_pressure
+            FROM snapshots WHERE company_id = ? AND ram_total_bytes > 0
+            GROUP BY device_id ORDER BY avg_pressure DESC
+            """,
+            (tenant_id,),
+        ).fetchall()
+        cols = [d[0] for d in self.con.description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def software_events(self, tenant_id: str, names: list[str] | None = None) -> list[dict]:
+        if names:
+            marks = ",".join("?" * len(names))
+            rows = self.con.execute(
+                f"""SELECT name, min(collected_at) AS first_seen, count(DISTINCT device_id) AS devices
+                    FROM installed_software WHERE company_id = ? AND name IN ({marks})
+                    GROUP BY name""",
+                (tenant_id, *names),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                """SELECT name, min(collected_at) AS first_seen, count(DISTINCT device_id) AS devices
+                   FROM installed_software WHERE company_id = ? GROUP BY name
+                   ORDER BY first_seen DESC""",
+                (tenant_id,),
+            ).fetchall()
+        cols = [d[0] for d in self.con.description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def device_exists(self, tenant_id: str, device_id: str) -> bool:
+        return self.con.execute(
+            "SELECT 1 FROM snapshots WHERE company_id = ? AND device_id = ? LIMIT 1",
+            (tenant_id, device_id),
+        ).fetchone() is not None
+
+    def device_tenant(self, device_id: str) -> str | None:
+        row = self.con.execute(
+            "SELECT company_id FROM snapshots WHERE device_id = ? LIMIT 1", (device_id,)
+        ).fetchone()
+        return row[0] if row else None
+
+    # ── actions + audit (append-only) ────────────────────────────────────
+    def propose_action(self, tenant_id: str, device_id: str, tool: str,
+                       args: dict, evidence: list[dict]) -> str:
+        aid = f"act_{uuid.uuid4().hex[:12]}"
+        self.con.execute(
+            "INSERT INTO actions VALUES (?,?,?,?,?,?,now())",
+            (aid, tenant_id, device_id, tool, json.dumps(args, sort_keys=True), "proposed"),
+        )
+        self.audit(tenant_id, event="proposal", tool=tool, args=args,
+                   evidence=evidence, detail=f"action_id={aid}")
+        return aid
+
+    def resolve_action(self, tenant_id: str, action_id: str, approved: bool,
+                       approver: str) -> bool:
+        status = "approved" if approved else "rejected"
+        row = self.con.execute(
+            "SELECT company_id, tool, args_json FROM actions WHERE action_id = ? AND status='proposed'",
+            (action_id,),
+        ).fetchone()
+        if not row or row[0] != tenant_id:
+            return False
+        self.con.execute("UPDATE actions SET status=? WHERE action_id=?", (status, action_id))
+        self.audit(tenant_id, approver=approver, event=status, tool=row[1],
+                   args=json.loads(row[2]), evidence=[],
+                   detail=f"action_id={action_id}")
+        return True
+
+    def audit(self, tenant_id: str, event: str, tool: str, args: dict,
+              evidence: list[dict], detail: str = "", approver: str = "") -> str:
+        aid = f"aud_{uuid.uuid4().hex[:12]}"
+        now_row = self.con.execute("SELECT now()").fetchone()
+        self.con.execute(
+            "INSERT INTO audit_log VALUES (?,?,?,?,?,?,?,?,?)",
+            (aid, now_row[0] if now_row else None, tenant_id, approver, event, tool,
+             json.dumps(args, sort_keys=True), json.dumps(evidence, default=str), detail),
+        )
+        return aid
+
+    def audit_tail(self, tenant_id: str, limit: int = 20) -> list[dict]:
+        rows = self.con.execute(
+            "SELECT * FROM audit_log WHERE tenant_id = ? ORDER BY ts DESC LIMIT ?",
+            (tenant_id, limit),
+        ).fetchall()
+        cols = [d[0] for d in self.con.description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def close(self):
+        self.con.close()
+
+
+if __name__ == "__main__":
+    data_dir = Path(__file__).resolve().parent.parent.parent / "data"
+    data_dir.mkdir(exist_ok=True)
+    src = Path(__file__).resolve().parent.parent.parent / "device-telemetry-dataset.ndjson"
+    db = data_dir / "fleet.duckdb"
+    n = load_ndjson(db, src)
+    print(f"loaded {n} snapshots -> {db}")

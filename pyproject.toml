@@ -1,0 +1,19 @@
+[project]
+name = "fleet-copilot"
+version = "0.1.0"
+description = "Agentic AI Fleet Copilot — take-home assessment (Rayda)"
+requires-python = ">=3.12"
+dependencies = [
+    "duckdb>=2.0",
+    "langgraph>=1.2",
+    "langchain-core>=1.8",
+    "langchain-google-genai>=3.0",
+    "python-dotenv>=1.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["evals", "tests"]
