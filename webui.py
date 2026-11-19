@@ -89,11 +89,12 @@ def stream_query(body: dict):
             # HITL pause: graph returns with __interrupt__ in state, resume here
             state = wf.get_state(thread)
             if state.next:  # interrupted mid-graph
-                yield ev("interrupt",
-                         actions=(state.values or {}).get("plan", {}).model_dump_json()
-                         if False else "")
-                payload = (state.tasks[0].interrupt.value
-                           if state.tasks and state.tasks[0].interrupt else {})
+                payload = {}
+                for task in state.tasks:
+                    interrupts = getattr(task, "interrupts", ()) or ()
+                    if interrupts:
+                        payload = interrupts[0].value or {}
+                        break
                 yield ev("interrupt", payload=json.loads(json.dumps(payload, default=str)))
                 return
             yield ev("done", response=final.get("response") or "(no response produced)",
@@ -378,7 +379,12 @@ async function ask(){
      }
      else if(e.type==='interrupt'&&!hitlShown){
        hitlShown=true; setNode('hitl','active');
-       $('answer').innerHTML=`<div class="hitl-banner">⏸ HITL gate paused — action proposed and awaiting human approval. Open the <b>Pending actions</b> tab to decide.</div>`;
+       $('run-badge').outerHTML=`<span class="chip" style="border-color:#8a6116;color:var(--amber)">⏸ awaiting approval</span>`;
+       const acts=(e.payload&&e.payload.proposed_actions)||[];
+       const list=acts.map(a=>`<div class="trow call"><span class="k">▸ ${a.tool}</span><span>${a.device_id} · ${a.rationale||''}</span></div>`).join('');
+       $('answer').innerHTML=`<div class="hitl-banner">⏸ <b>HITL gate</b> — ${acts.length} action(s) proposed and awaiting human approval.
+         ${list}
+         Open the <b>Pending actions</b> tab to approve or reject.</div>`;
      }
      else if(e.type==='done'){
        ['verifier','formatter'].forEach(n=>setNode(n,'done'));
