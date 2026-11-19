@@ -427,115 +427,115 @@ document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
  if(b.dataset.tab==='audit')loadAudit(); if(b.dataset.tab==='pending')loadPending();
 });
 async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return r.json();}
+
+/* per-card context: all DOM refs are scoped, never by global id */
+function makeCtx(card){
+  const uid='c'+Date.now()+Math.floor(Math.random()*1e4);
+  card.setAttribute('data-uid',uid);
+  const q=s=>card.querySelector(s);
+  return {uid, card,
+    badge:q('.run-badge'), answer:q('.answer-slot'), trace:q('.live-trace'),
+    setNode(node,status){
+      const el=q(`.pstep[data-node="${node}"]`); if(!el)return;
+      el.classList.remove('active','done'); if(status)el.classList.add(status);
+    },
+    badgeHTML(html){this.badge.outerHTML=html; this.badge=q('.run-badge')||q('.chip');},
+  };
+}
 function pipelineHTML(){
  return `<div class="pipe">${NODES.map(([id,label],i)=>
-  `<span class="pnode"><span class="pstep" id="pn-${id}"><span class="bullet"></span>${label}</span>${i<NODES.length-1?'<span class="parrow">→</span>':''}</span>`).join('')}
-  </div><div id="live-trace"></div>`;
+  `<span class="pnode"><span class="pstep" data-node="${id}"><span class="bullet"></span>${label}</span>${i<NODES.length-1?'<span class="parrow">→</span>':''}</span>`).join('')}
+  </div><div class="live-trace"></div>`;
 }
-function setNode(id,status){
- const el=$('pn-'+id); if(!el)return;
- el.classList.remove('active','done'); if(status)el.classList.add(status);
-}
-let currentThread=null, currentTenant='acme-001';
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+
 async function ask(){
  const q=$('q').value.trim(); if(!q)return;
  $('empty-state')?.remove();
- currentTenant=$('tenant').value;
+ const tenant=$('tenant').value;
  const card=document.createElement('div');card.className='card';
  card.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-   <b style="font-size:14px">${q}</b><span class="chip blue" id="run-badge"><span class="spin"></span> running</span></div>
-   ${pipelineHTML()}<div id="answer"></div>`;
+   <b style="font-size:14px">${esc(q)}</b><span class="chip blue run-badge"><span class="spin"></span> running</span></div>
+   ${pipelineHTML()}<div class="answer-slot"></div>`;
  $('history').prepend(card);
- $('q').value=''; NODES.forEach(([id])=>setNode(id,null));
- const res=await fetch('/api/query_stream',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({query:q,tenant:$('tenant').value,n:Date.now()})});
+ $('q').value='';
+ const ctx=makeCtx(card);
+ NODES.forEach(([id])=>ctx.setNode(id,null));
+ await consumeStream('/api/query_stream',{query:q,tenant:tenant,n:Date.now()},ctx,{});
+}
+
+async function resumeThread(approved){
+ const ctx=window._hitlCtx; if(!ctx)return;
+ ctx.setNode('hitl','done');
+ await consumeStream('/api/resume_stream',
+   {thread_id:window._hitlThread,tenant:$('tenant').value,approved,approver:'web-user'},
+   ctx,{resume:true,approved});
+}
+
+async function consumeStream(url,body,ctx,st){
+ const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  const reader=res.body.getReader(); const dec=new TextDecoder(); let buf='';
  let tools=new Set(), hitlShown=false;
+ const toolsHTML=()=>tools.size?`<div class="section-label">Tools used</div><div style="margin:4px 0 10px">${[...tools].map(t=>`<span class="chip">${t}</span>`).join(' ')}</div>`:'';
  const handleEvent=(e)=>{
-     if(e.type==='start'){currentThread=e.thread_id||currentThread;}
-     else if(e.type==='node'){setNode(e.node,e.status); if(e.node==='analyst'&&e.status==='active')setNode('execute_tools',null);}
-     else if(e.type==='tool_call'){
-       setNode('execute_tools','active'); tools.add(e.tool);
-       $('live-trace').insertAdjacentHTML('beforeend',
-        `<div class="trow call"><span class="k">→ ${e.tool}</span><span>${e.args}</span></div>`);
-     }
-     else if(e.type==='tool_result'){
-       $('live-trace').insertAdjacentHTML('beforeend',
-        `<div class="trow result"><span class="k">⎋ result</span><span>${e.result.slice(0,180)}</span></div>`);
-     }
-     else if(e.type==='interrupt'&&!hitlShown){
-       hitlShown=true; setNode('hitl','active');
-       currentThread=e.thread_id||currentThread;
-       $('run-badge').outerHTML=`<span class="chip" style="border-color:#8a6116;color:var(--amber)">⏸ awaiting approval</span>`;
-       const acts=(e.payload&&e.payload.proposed_actions)||[];
-       const list=acts.map(a=>`<div class="trow call" data-aid="${a.action_id}"><span class="k">▸ ${a.tool}</span><span>${a.device_id} · ${a.rationale||''}</span></div>`).join('');
-       $('answer').innerHTML=`<div class="hitl-banner" id="hitl-banner">⏸ <b>HITL gate</b> — ${acts.length} action(s) proposed.
-         ${list}
-         <div class="row" style="margin-top:10px">
-          <button class="primary btn-approve" onclick="resumeThread(true)">Approve & continue</button>
-          <button class="btn-reject" onclick="resumeThread(false)" style="min-height:40px">Reject</button>
-         </div></div>`;
-     }
-     else if(e.type==='resolved'){
-       setNode('hitl','done');
-       $('run-badge').outerHTML=`<span class="chip ${e.approved?'green':'red'}">${e.approved?'APPROVED':'REJECTED'} · resuming</span>`;
-     }
-     else if(e.type==='done'){
-       ['verifier','formatter'].forEach(n=>setNode(n,'done'));
-       $('run-badge').outerHTML=`<span class="chip ${e.decision?(e.decision==='APPROVED'?'green':'red'):'green'}">${e.decision?e.decision:e.intent}</span>`;
-       let html=`<div class="section-label">Answer</div><p class="answer">${e.response.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\n/g,'<br>')}</p>`;
-       if(tools.size)html=`<div class="section-label">Tools used</div><div style="margin:4px 0 10px">${[...tools].map(t=>`<span class="chip">${t}</span>`).join(' ')}</div>`+html;
-       $('answer').innerHTML=html;
-       loadPending();
-     }
-     else if(e.type==='error'){
-       $('run-badge').outerHTML=`<span class="chip red">error</span>`;
-       $('answer').insertAdjacentHTML('beforeend',`<div class="answer" style="color:var(--red)">${e.message}</div>`);
-     }
+   if(e.type==='node'){
+     ctx.setNode(e.node,e.status);
+     if(e.node==='analyst'&&e.status==='active')ctx.setNode('execute_tools',null);
+   }
+   else if(e.type==='tool_call'){
+     ctx.setNode('execute_tools','active'); tools.add(e.tool);
+     ctx.trace.insertAdjacentHTML('beforeend',
+      `<div class="trow call"><span class="k">→ ${e.tool}</span><span>${esc(e.args)}</span></div>`);
+   }
+   else if(e.type==='tool_result'){
+     ctx.trace.insertAdjacentHTML('beforeend',
+      `<div class="trow result"><span class="k">⎋ result</span><span>${esc(e.result.slice(0,180))}</span></div>`);
+   }
+   else if(e.type==='interrupt'&&!hitlShown){
+     hitlShown=true; ctx.setNode('hitl','active');
+     window._hitlThread=e.thread_id; window._hitlCtx=ctx;
+     ctx.badge.outerHTML=`<span class="chip run-badge" style="border-color:#8a6116;color:var(--amber)">⏸ awaiting approval</span>`;
+     ctx.badge=ctx.card.querySelector('.run-badge');
+     const acts=(e.payload&&e.payload.proposed_actions)||[];
+     const list=acts.map(a=>`<div class="trow call" data-aid="${a.action_id}"><span class="k">▸ ${a.tool}</span><span>${esc(a.device_id+' · '+(a.rationale||''))}</span></div>`).join('');
+     ctx.answer.innerHTML=`<div class="hitl-banner">⏸ <b>HITL gate</b> — ${acts.length} action(s) proposed.
+       ${list}
+       <div class="row" style="margin-top:10px">
+        <button class="primary btn-approve" onclick="resumeThread(true)">Approve & continue</button>
+        <button class="btn-reject" onclick="resumeThread(false)" style="min-height:40px">Reject</button>
+       </div></div>`;
+   }
+   else if(e.type==='resolved'){
+     ctx.setNode('hitl','done');
+     ctx.badge.outerHTML=`<span class="chip ${e.approved?'green':'red'}">${e.approved?'APPROVED':'REJECTED'} · resuming</span>`;
+   }
+   else if(e.type==='done'){
+     ['verifier','formatter'].forEach(n=>ctx.setNode(n,'done'));
+     const decision=e.decision||(st.resume?(e.decision||''):'');
+     ctx.badge.outerHTML=`<span class="chip ${decision?(decision==='APPROVED'?'green':'red'):'green'}">${decision||e.intent||'done'}</span>`;
+     ctx.answer.innerHTML=toolsHTML()+`<div class="section-label">Answer</div><p class="answer">${esc(e.response||'(no response produced)').replace(/\n/g,'<br>')}</p>`;
+     loadPending();
+   }
+   else if(e.type==='error'){
+     ctx.badge.outerHTML=`<span class="chip red">error</span>`;
+     ctx.answer.insertAdjacentHTML('beforeend',`<div class="answer" style="color:var(--red)">⚠ ${esc(e.message)}</div>`);
+   }
  };
- while(true){
-   const {value,done}=await reader.read(); if(done)break;
-   buf+=dec.decode(value,{stream:true});
-   let idx;
-   while((idx=buf.indexOf('\n\n'))>=0){
-     const line=buf.slice(0,idx); buf=buf.slice(idx+2);
-     if(!line.startsWith('data: '))continue;
-     handleEvent(JSON.parse(line.slice(6)));
-   }
- }
-}
-async function resumeThread(approved){
- if(!currentThread)return;
- // reuse the last card's live elements by re-creating streaming state
- const res=await fetch('/api/resume_stream',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({thread_id:currentThread,tenant:currentTenant,approved,approver:'web-user'})});
- const reader=res.body.getReader(); const dec=new TextDecoder(); let buf='';
- while(true){
-   const {value,done}=await reader.read(); if(done)break;
-   buf+=dec.decode(value,{stream:true});
-   let idx;
-   while((idx=buf.indexOf('\n\n'))>=0){
-     const line=buf.slice(0,idx); buf=buf.slice(idx+2);
-     if(!line.startsWith('data: '))continue;
-     const e=JSON.parse(line.slice(6));
-     if(e.type==='node'){setNode(e.node,e.status);}
-     else if(e.type==='resolved'){
-       setNode('hitl','done');
-       $('run-badge').outerHTML=`<span class="chip ${e.approved?'green':'red'}">${e.approved?'APPROVED':'REJECTED'} · resuming</span>`;
-     }
-     else if(e.type==='done'){
-       ['formatter'].forEach(n=>setNode(n,'done'));
-       $('run-badge').outerHTML=`<span class="chip ${e.decision==='APPROVED'?'green':'red'}">${e.decision}</span>`;
-       $('answer').innerHTML=`<div class="section-label">Answer</div><p class="answer">${e.response.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\n/g,'<br>')}</p>`;
-       loadPending();
-     }
-     else if(e.type==='error'){
-       $('run-badge').outerHTML=`<span class="chip red">error</span>`;
-       $('answer').insertAdjacentHTML('beforeend',`<div class="answer" style="color:var(--red)">${e.message}</div>`);
+ try{
+   while(true){
+     const {value,done}=await reader.read(); if(done)break;
+     buf+=dec.decode(value,{stream:true});
+     let idx;
+     while((idx=buf.indexOf('\n\n'))>=0){
+       const line=buf.slice(0,idx); buf=buf.slice(idx+2);
+       if(!line.startsWith('data: '))continue;
+       try{handleEvent(JSON.parse(line.slice(6)));}
+       catch(err){ctx.answer.insertAdjacentHTML('beforeend',`<div class="answer" style="color:var(--red)">⚠ handler: ${esc(err.message)}</div>`);}
      }
    }
- }
+ }catch(err){ctx.answer.insertAdjacentHTML('beforeend',`<div class="answer" style="color:var(--red)">⚠ stream: ${esc(err.message)}</div>`);}
 }
+
 async function loadAudit(){
  try{
   const res=await post('/api/audit',{tenant:$('tenant').value,limit:50});
@@ -571,7 +571,6 @@ async function resolve(aid,approved){
  loadPending();
 }
 function markResolvedInChat(aid,approved,resumed){
- // update any HITL banner in the Copilot cards that references this action
  const row=document.querySelector(`.trow[data-aid="${aid}"]`);
  if(!row)return;
  const banner=row.closest('.hitl-banner'); if(!banner)return;
