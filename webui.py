@@ -43,6 +43,7 @@ def _get_repo() -> Repository:
 
 
 _wf_cache = None
+_parked = {}  # action_id -> thread_id (HITL proposals waiting for a decision)
 
 
 def _get_wf():
@@ -103,6 +104,9 @@ def stream_query(body: dict):
                     if interrupts:
                         payload = interrupts[0].value or {}
                         break
+                for p in payload.get("proposed_actions", []):
+                    if str(p.get("action_id", "")).startswith("act_"):
+                        _parked[p["action_id"]] = thread_id
                 yield ev("interrupt", thread_id=thread_id,
                          payload=json.loads(json.dumps(payload, default=str)))
                 return
@@ -145,6 +149,7 @@ def stream_resume(body: dict):
                 aid = p.get("action_id", "")
                 if aid.startswith("act_"):
                     ok = repo.resolve_action(tenant, aid, approved, approver)
+                    _parked.pop(aid, None)
                     resolved.append({"action_id": aid, "resolved": ok})
             yield ev("resolved", actions=resolved, approved=approved)
             for chunk in wf.stream(Command(resume={"approved": approved, "approver": approver}),
@@ -183,10 +188,28 @@ def api_pending(body: dict) -> dict:
 
 
 def api_resolve(body: dict) -> dict:
-    ok = _get_repo().resolve_action(body.get("tenant", "acme-001"), body["action_id"],
-                                    approved=bool(body.get("approved")),
+    tenant = body.get("tenant", "acme-001")
+    aid = body["action_id"]
+    approved = bool(body.get("approved"))
+    ok = _get_repo().resolve_action(tenant, aid, approved=approved,
                                     approver=body.get("approver", "web-user"))
-    return {"ok": ok}
+    # if this action parks a graph thread (approved from the Pending tab),
+    # resume it server-side so the checkpoint completes and state stays consistent
+    thread_id = _parked.pop(aid, None)
+    resumed = False
+    if ok and thread_id:
+        try:
+            with _run_lock:
+                wf = _get_wf()
+                thread = {"configurable": {"thread_id": thread_id, "tenant_id": tenant}}
+                for _ in wf.stream(Command(resume={"approved": approved,
+                                                   "approver": body.get("approver", "web-user")}),
+                                   config=thread, stream_mode="updates"):
+                    pass
+            resumed = True
+        except Exception:  # noqa: BLE001 — resolve already succeeded; resume is best-effort
+            resumed = False
+    return {"ok": ok, "resumed": resumed}
 
 
 # ── HTTP layer ──────────────────────────────────────────────────────────────
@@ -445,8 +468,8 @@ async function ask(){
        currentThread=e.thread_id||currentThread;
        $('run-badge').outerHTML=`<span class="chip" style="border-color:#8a6116;color:var(--amber)">⏸ awaiting approval</span>`;
        const acts=(e.payload&&e.payload.proposed_actions)||[];
-       const list=acts.map(a=>`<div class="trow call"><span class="k">▸ ${a.tool}</span><span>${a.device_id} · ${a.rationale||''}</span></div>`).join('');
-       $('answer').innerHTML=`<div class="hitl-banner">⏸ <b>HITL gate</b> — ${acts.length} action(s) proposed.
+       const list=acts.map(a=>`<div class="trow call" data-aid="${a.action_id}"><span class="k">▸ ${a.tool}</span><span>${a.device_id} · ${a.rationale||''}</span></div>`).join('');
+       $('answer').innerHTML=`<div class="hitl-banner" id="hitl-banner">⏸ <b>HITL gate</b> — ${acts.length} action(s) proposed.
          ${list}
          <div class="row" style="margin-top:10px">
           <button class="primary btn-approve" onclick="resumeThread(true)">Approve & continue</button>
@@ -543,8 +566,19 @@ async function resolve(aid,approved){
  try{
   const res=await post('/api/resolve',{action_id:aid,approved,tenant:$('tenant').value,approver:'web-user'});
   if(!res.ok)alert('Could not resolve: not found, already resolved, or wrong tenant.');
+  else markResolvedInChat(aid,approved,res.resumed);
  }catch(err){alert('DuckDB busy — close the CLI session first.');}
  loadPending();
+}
+function markResolvedInChat(aid,approved,resumed){
+ // update any HITL banner in the Copilot cards that references this action
+ const row=document.querySelector(`.trow[data-aid="${aid}"]`);
+ if(!row)return;
+ const banner=row.closest('.hitl-banner'); if(!banner)return;
+ banner.innerHTML=`<span class="chip ${approved?'green':'red'}">${approved?'APPROVED':'REJECTED'} via Pending tab</span>
+   <span class="muted" style="margin-left:8px">${aid}${resumed?' — graph resumed server-side':''}</span>`;
+ const badge=document.querySelector('.chip[style*="8a6116"]');
+ if(badge)badge.outerHTML=`<span class="chip ${approved?'green':'red'}">${approved?'APPROVED':'REJECTED'}</span>`;
 }
 </script></body></html>"""
 

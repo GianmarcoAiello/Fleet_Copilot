@@ -189,6 +189,22 @@ def hitl_gate(state: AgentState) -> dict:
         "message": "Approve these actions? Resume with Command(resume={'approved': bool, 'approver': str})",
     })
     approved = bool(decision.get("approved"))
+    approver = str(decision.get("approver") or "human")
+    # proposals that never reached the action tools (no DB row yet) are created
+    # and resolved here, so approval always leaves a complete audit trail
+    if _REPO_REF is not None:
+        for p in proposals:
+            if p.action_id.startswith("unproposed_"):
+                if approved and p.device_id in _evidence_pool(state.get("tool_outputs", [])):
+                    real = _REPO_REF.propose_action(
+                        state["tenant_id"], p.device_id, p.tool, p.args,
+                        [e.model_dump() for e in p.evidence])
+                    _REPO_REF.resolve_action(state["tenant_id"], real, True, approver)
+                    p.action_id = real
+                else:
+                    _REPO_REF.audit(state["tenant_id"], event="refusal", tool=p.tool,
+                                    args=p.args, evidence=[e.model_dump() for e in p.evidence],
+                                    detail="unproposed action rejected or ungrounded")
     return {"approval": decision, "approved": approved}
 
 
