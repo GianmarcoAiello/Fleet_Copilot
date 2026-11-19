@@ -42,8 +42,16 @@ def _get_repo() -> Repository:
         return _repo
 
 
+_wf_cache = None
+
+
 def _get_wf():
-    return build_workflow(_get_repo(), checkpointer=MemorySaver())
+    """Build the compiled graph ONCE — the MemorySaver holds parked HITL
+    threads; rebuilding it would orphan them (KeyError on resume)."""
+    global _wf_cache
+    if _wf_cache is None:
+        _wf_cache = build_workflow(_get_repo(), checkpointer=MemorySaver())
+    return _wf_cache
 
 
 NODES = [("planner", "Planner"), ("analyst", "Analyst"), ("verifier", "Verifier"),
@@ -54,20 +62,21 @@ def stream_query(body: dict):
     """Generator yielding SSE events while the graph runs."""
     tenant = body.get("tenant", "acme-001")
     query = body.get("query", "")
+    thread_id = f"web-{body.get('n', 0)}"
 
     def ev(etype: str, **kw) -> str:
         return "data: " + json.dumps({"type": etype, **kw}, default=str) + "\n\n"
 
-    yield ev("start", tenant=tenant, nodes=[n for n, _ in NODES])
+    yield ev("start", tenant=tenant, thread_id=thread_id)
     with _run_lock:
         wf = _get_wf()
-        thread = {"configurable": {"thread_id": f"web-{body.get('n', 0)}",
-                                   "tenant_id": tenant}}
+        thread = {"configurable": {"thread_id": thread_id, "tenant_id": tenant}}
         final = {}
         try:
-            for chunk in wf.stream(
-                    {"query": query, "tenant_id": tenant},
-                    config=thread, stream_mode="updates"):
+            updates = wf.stream({"query": query, "tenant_id": tenant},
+                                config=thread, stream_mode="updates")
+            interrupted = False
+            for chunk in updates:
                 for node, delta in chunk.items():
                     if node == "__interrupt__":
                         yield ev("node", node="hitl", status="active",
@@ -86,22 +95,74 @@ def stream_query(body: dict):
                                              args=json.dumps(c["args"], default=str)[:220])
                     final.update(delta or {})
                     yield ev("node", node=node, status="done")
-            # HITL pause: graph returns with __interrupt__ in state, resume here
             state = wf.get_state(thread)
-            if state.next:  # interrupted mid-graph
+            if state.next:  # interrupted mid-graph: hand the proposal to the client
                 payload = {}
                 for task in state.tasks:
                     interrupts = getattr(task, "interrupts", ()) or ()
                     if interrupts:
                         payload = interrupts[0].value or {}
                         break
-                yield ev("interrupt", payload=json.loads(json.dumps(payload, default=str)))
+                yield ev("interrupt", thread_id=thread_id,
+                         payload=json.loads(json.dumps(payload, default=str)))
                 return
             yield ev("done", response=final.get("response") or "(no response produced)",
                      intent=final.get("plan", {}).intent if final.get("plan") else "?",
                      tools=sorted({t["tool"] for t in final.get("tool_outputs", [])}))
         except Exception as exc:  # noqa: BLE001
-            yield ev("error", message=f"{type(exc).__name__}: {exc}")
+            import traceback
+            yield ev("error", message=f"{type(exc).__name__}: {exc}",
+                     trace=traceback.format_exc()[-1200:])
+
+
+def stream_resume(body: dict):
+    """Resolve the proposed action(s) and resume a parked graph thread via SSE."""
+    tenant = body.get("tenant", "acme-001")
+    thread_id = body.get("thread_id", "")
+    approved = bool(body.get("approved"))
+    approver = body.get("approver", "web-user")
+
+    def ev(etype: str, **kw) -> str:
+        return "data: " + json.dumps({"type": etype, **kw}, default=str) + "\n\n"
+
+    yield ev("start", tenant=tenant, thread_id=thread_id)
+    with _run_lock:
+        repo = _get_repo()
+        wf = _get_wf()
+        thread = {"configurable": {"thread_id": thread_id, "tenant_id": tenant}}
+        final = {}
+        try:
+            state = wf.get_state(thread)
+            payload = {}
+            for task in state.tasks:
+                interrupts = getattr(task, "interrupts", ()) or ()
+                if interrupts:
+                    payload = interrupts[0].value or {}
+                    break
+            # resolve every real DB action tied to this proposal
+            resolved = []
+            for p in payload.get("proposed_actions", []):
+                aid = p.get("action_id", "")
+                if aid.startswith("act_"):
+                    ok = repo.resolve_action(tenant, aid, approved, approver)
+                    resolved.append({"action_id": aid, "resolved": ok})
+            yield ev("resolved", actions=resolved, approved=approved)
+            for chunk in wf.stream(Command(resume={"approved": approved, "approver": approver}),
+                                   config=thread, stream_mode="updates"):
+                for node, delta in chunk.items():
+                    if node in ("__interrupt__",):
+                        continue
+                    yield ev("node", node=node, status="active")
+                    final.update(delta or {})
+                    yield ev("node", node=node, status="done")
+            yield ev("done", response=final.get("response") or "(no response produced)",
+                     intent=final.get("plan", {}).intent if final.get("plan") else "?",
+                     tools=sorted({t["tool"] for t in final.get("tool_outputs", [])}),
+                     decision="APPROVED" if approved else "REJECTED")
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+            yield ev("error", message=f"{type(exc).__name__}: {exc}",
+                     trace=traceback.format_exc()[-1200:])
 
 
 # ── JSON APIs ───────────────────────────────────────────────────────────────
@@ -158,12 +219,18 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return self._json({"error": "bad json"}, 400)
         if self.path == "/api/query_stream":
+            gen = stream_query(body)
+        elif self.path == "/api/resume_stream":
+            gen = stream_resume(body)
+        else:
+            gen = None
+        if gen is not None:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             try:
-                for chunk in stream_query(body):
+                for chunk in gen:
                     self.wfile.write(chunk.encode())
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
@@ -346,9 +413,11 @@ function setNode(id,status){
  const el=$('pn-'+id); if(!el)return;
  el.classList.remove('active','done'); if(status)el.classList.add(status);
 }
+let currentThread=null, currentTenant='acme-001';
 async function ask(){
  const q=$('q').value.trim(); if(!q)return;
  $('empty-state')?.remove();
+ currentTenant=$('tenant').value;
  const card=document.createElement('div');card.className='card';
  card.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
    <b style="font-size:14px">${q}</b><span class="chip blue" id="run-badge"><span class="spin"></span> running</span></div>
@@ -358,16 +427,10 @@ async function ask(){
  const res=await fetch('/api/query_stream',{method:'POST',headers:{'Content-Type':'application/json'},
    body:JSON.stringify({query:q,tenant:$('tenant').value,n:Date.now()})});
  const reader=res.body.getReader(); const dec=new TextDecoder(); let buf='';
- let answer=null, tools=new Set(), hitlShown=false;
- while(true){
-   const {value,done}=await reader.read(); if(done)break;
-   buf+=dec.decode(value,{stream:true});
-   let idx;
-   while((idx=buf.indexOf('\n\n'))>=0){
-     const line=buf.slice(0,idx); buf=buf.slice(idx+2);
-     if(!line.startsWith('data: '))continue;
-     const e=JSON.parse(line.slice(6));
-     if(e.type==='node'){setNode(e.node,e.status); if(e.node==='analyst'&&e.status==='active')setNode('execute_tools',null);}
+ let tools=new Set(), hitlShown=false;
+ const handleEvent=(e)=>{
+     if(e.type==='start'){currentThread=e.thread_id||currentThread;}
+     else if(e.type==='node'){setNode(e.node,e.status); if(e.node==='analyst'&&e.status==='active')setNode('execute_tools',null);}
      else if(e.type==='tool_call'){
        setNode('execute_tools','active'); tools.add(e.tool);
        $('live-trace').insertAdjacentHTML('beforeend',
@@ -379,22 +442,73 @@ async function ask(){
      }
      else if(e.type==='interrupt'&&!hitlShown){
        hitlShown=true; setNode('hitl','active');
+       currentThread=e.thread_id||currentThread;
        $('run-badge').outerHTML=`<span class="chip" style="border-color:#8a6116;color:var(--amber)">⏸ awaiting approval</span>`;
        const acts=(e.payload&&e.payload.proposed_actions)||[];
        const list=acts.map(a=>`<div class="trow call"><span class="k">▸ ${a.tool}</span><span>${a.device_id} · ${a.rationale||''}</span></div>`).join('');
-       $('answer').innerHTML=`<div class="hitl-banner">⏸ <b>HITL gate</b> — ${acts.length} action(s) proposed and awaiting human approval.
+       $('answer').innerHTML=`<div class="hitl-banner">⏸ <b>HITL gate</b> — ${acts.length} action(s) proposed.
          ${list}
-         Open the <b>Pending actions</b> tab to approve or reject.</div>`;
+         <div class="row" style="margin-top:10px">
+          <button class="primary btn-approve" onclick="resumeThread(true)">Approve & continue</button>
+          <button class="btn-reject" onclick="resumeThread(false)" style="min-height:40px">Reject</button>
+         </div></div>`;
+     }
+     else if(e.type==='resolved'){
+       setNode('hitl','done');
+       $('run-badge').outerHTML=`<span class="chip ${e.approved?'green':'red'}">${e.approved?'APPROVED':'REJECTED'} · resuming</span>`;
      }
      else if(e.type==='done'){
        ['verifier','formatter'].forEach(n=>setNode(n,'done'));
-       $('run-badge').outerHTML=`<span class="chip green">${e.intent}</span>`;
-       $('answer').innerHTML=`<div class="section-label">Answer</div><p class="answer">${e.response.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\n/g,'<br>')}</p>`;
-       if(tools.size)$('answer').innerHTML=`<div class="section-label">Tools used</div><div style="margin:4px 0 10px">${[...tools].map(t=>`<span class="chip">${t}</span>`).join(' ')}</div>`+$('answer').innerHTML;
+       $('run-badge').outerHTML=`<span class="chip ${e.decision?(e.decision==='APPROVED'?'green':'red'):'green'}">${e.decision?e.decision:e.intent}</span>`;
+       let html=`<div class="section-label">Answer</div><p class="answer">${e.response.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\n/g,'<br>')}</p>`;
+       if(tools.size)html=`<div class="section-label">Tools used</div><div style="margin:4px 0 10px">${[...tools].map(t=>`<span class="chip">${t}</span>`).join(' ')}</div>`+html;
+       $('answer').innerHTML=html;
+       loadPending();
      }
      else if(e.type==='error'){
        $('run-badge').outerHTML=`<span class="chip red">error</span>`;
-       $('answer').innerHTML=`<div class="answer" style="color:var(--red)">${e.message}</div>`;
+       $('answer').insertAdjacentHTML('beforeend',`<div class="answer" style="color:var(--red)">${e.message}</div>`);
+     }
+ };
+ while(true){
+   const {value,done}=await reader.read(); if(done)break;
+   buf+=dec.decode(value,{stream:true});
+   let idx;
+   while((idx=buf.indexOf('\n\n'))>=0){
+     const line=buf.slice(0,idx); buf=buf.slice(idx+2);
+     if(!line.startsWith('data: '))continue;
+     handleEvent(JSON.parse(line.slice(6)));
+   }
+ }
+}
+async function resumeThread(approved){
+ if(!currentThread)return;
+ // reuse the last card's live elements by re-creating streaming state
+ const res=await fetch('/api/resume_stream',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({thread_id:currentThread,tenant:currentTenant,approved,approver:'web-user'})});
+ const reader=res.body.getReader(); const dec=new TextDecoder(); let buf='';
+ while(true){
+   const {value,done}=await reader.read(); if(done)break;
+   buf+=dec.decode(value,{stream:true});
+   let idx;
+   while((idx=buf.indexOf('\n\n'))>=0){
+     const line=buf.slice(0,idx); buf=buf.slice(idx+2);
+     if(!line.startsWith('data: '))continue;
+     const e=JSON.parse(line.slice(6));
+     if(e.type==='node'){setNode(e.node,e.status);}
+     else if(e.type==='resolved'){
+       setNode('hitl','done');
+       $('run-badge').outerHTML=`<span class="chip ${e.approved?'green':'red'}">${e.approved?'APPROVED':'REJECTED'} · resuming</span>`;
+     }
+     else if(e.type==='done'){
+       ['formatter'].forEach(n=>setNode(n,'done'));
+       $('run-badge').outerHTML=`<span class="chip ${e.decision==='APPROVED'?'green':'red'}">${e.decision}</span>`;
+       $('answer').innerHTML=`<div class="section-label">Answer</div><p class="answer">${e.response.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\n/g,'<br>')}</p>`;
+       loadPending();
+     }
+     else if(e.type==='error'){
+       $('run-badge').outerHTML=`<span class="chip red">error</span>`;
+       $('answer').insertAdjacentHTML('beforeend',`<div class="answer" style="color:var(--red)">${e.message}</div>`);
      }
    }
  }

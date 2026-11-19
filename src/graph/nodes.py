@@ -168,8 +168,20 @@ def hitl_gate(state: AgentState) -> dict:
     for act in plan.action_requests:
         ok = all(e.device_id in _evidence_pool(state.get("tool_outputs", []))
                  for e in act.evidence)
+        # link to the real DB action created by the tool call (if any), so the
+        # UI can resolve it by id without a second lookup
+        real = None
+        if _REPO_REF is not None:
+            row = _REPO_REF.con.execute(
+                "SELECT action_id FROM actions WHERE company_id=? AND status='proposed' "
+                "AND tool=? AND device_id=? ORDER BY created_at DESC LIMIT 1",
+                (state["tenant_id"], act.tool, act.device_id)).fetchone()
+            real = row[0] if row else None
+        evidence = act.evidence or []
+        if not evidence and ok is False:
+            evidence = []
         proposals.append(act.model_copy(update={
-            "action_id": f"pending_{len(proposals)}",
+            "action_id": real or f"unproposed_{len(proposals)}",
             "rationale": act.rationale or ("evidence-grounded" if ok else "INSUFFICIENT EVIDENCE")}))
     decision = interrupt({
         "proposed_actions": [p.model_dump() for p in proposals],
@@ -201,8 +213,13 @@ def formatter(state: AgentState) -> dict:
     return {"response": "\n\n".join(parts)}
 
 
+_REPO_REF = None  # set by build_workflow; used by hitl_gate for action-id linkage
+
+
 def build_workflow(repo, checkpointer=None):
     """Compile the StateGraph. `repo` must be set before invocation."""
+    global _REPO_REF
+    _REPO_REF = repo
     from langgraph.graph import END, StateGraph
     set_repo(repo)
     g = StateGraph(AgentState)
