@@ -44,19 +44,47 @@ evidence refs (device_id, collected_at, metric, value) that support it. Claims w
 no supporting evidence must be listed as unsupported."""
 
 
+NOUS_DEFAULT_BASE_URL = "https://inference-api.nousresearch.com/v1"
+
+# LLM_API_KEY → the constructor kwarg each langchain provider expects
+_PROVIDER_KEY_PARAM = {
+    "anthropic": "anthropic_api_key",
+    "google_genai": "google_api_key",
+    "openai": "api_key",
+}
+
+
 def get_llm(temperature: float = 0.0):
-    """BYOK via langchain init_chat_model. Provider/model/keys come from env:
-    FLEET_LLM_MODEL (e.g. 'google_genai:gemini-flash-lite-latest') + the provider's
-    standard key var (GOOGLE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY).
-    Nous Portal: slash-style IDs ('openai/gpt-6-luna') + NOUS_API_KEY are routed
-    to the Nous OpenAI-compatible endpoint (override with NOUS_BASE_URL)."""
+    """BYOK: bring your own provider via three env vars (see .env.example):
+      FLEET_LLM_MODEL  model id, provider-qualified: 'google_genai:gemini-2.0-flash',
+                       'anthropic:claude-sonnet-4-5', 'openai/gpt-6-luna' (slash form
+                       = OpenAI-compatible endpoint), or a bare id when LLM_BASE_URL
+                       identifies the endpoint.
+      LLM_API_KEY      your key for that provider.
+      LLM_BASE_URL     optional OpenAI-compatible endpoint (Nous Portal, OpenRouter,
+                       vLLM, Ollama…). Any model id is then served through it.
+    Legacy NOUS_API_KEY / NOUS_BASE_URL are still honoured."""
     model = os.environ.get("FLEET_LLM_MODEL", "google_genai:gemini-flash-lite-latest")
+    api_key = os.environ.get("LLM_API_KEY") or os.environ.get("NOUS_API_KEY")
+    base_url = os.environ.get("LLM_BASE_URL") or os.environ.get("NOUS_BASE_URL")
     kwargs: dict = {}
-    if model.startswith("openai/") and os.environ.get("NOUS_API_KEY"):
-        kwargs["api_key"] = os.environ["NOUS_API_KEY"]
-        kwargs["base_url"] = os.environ.get(
-            "NOUS_BASE_URL", "https://inference-api.nousresearch.com/v1")
-        model = "openai:" + model  # langchain wants 'provider:model'; keep the slash ID
+    if base_url:
+        # OpenAI-compatible endpoint: serve ANY model id through ChatOpenAI.
+        # The full id (including a 'openai/' prefix) is the model name the
+        # endpoint expects — Nous Portal ids are slash-style, do not strip it.
+        kwargs["api_key"] = api_key
+        kwargs["base_url"] = base_url
+        model = "openai:" + model  # langchain wants 'provider:model'
+    elif model.startswith("openai/") and api_key:
+        # slash id without explicit base_url: a Nous Portal id keeps working
+        kwargs["api_key"] = api_key
+        kwargs["base_url"] = NOUS_DEFAULT_BASE_URL
+        model = "openai:" + model
+    elif api_key and ":" in model:
+        # native provider: map the generic key to the constructor kwarg it expects
+        provider = model.split(":", 1)[0]
+        if param := _PROVIDER_KEY_PARAM.get(provider):
+            kwargs[param] = api_key
     return init_chat_model(model, temperature=temperature, **kwargs)
 
 
