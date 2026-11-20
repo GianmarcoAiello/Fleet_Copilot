@@ -45,16 +45,24 @@ no supporting evidence must be listed as unsupported."""
 
 def get_llm(temperature: float = 0.0):
     """BYOK via langchain init_chat_model. Provider/model/keys come from env:
-    FLEET_LLM_MODEL (e.g. 'google:gemini-flash-lite-latest') + the provider's
-    standard key var (GOOGLE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY)."""
+    FLEET_LLM_MODEL (e.g. 'google_genai:gemini-flash-lite-latest') + the provider's
+    standard key var (GOOGLE_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY).
+    Nous Portal: slash-style IDs ('openai/gpt-6-luna') + NOUS_API_KEY are routed
+    to the Nous OpenAI-compatible endpoint (override with NOUS_BASE_URL)."""
     model = os.environ.get("FLEET_LLM_MODEL", "google_genai:gemini-flash-lite-latest")
-    return init_chat_model(model, temperature=temperature)
+    kwargs: dict = {}
+    if model.startswith("openai/") and os.environ.get("NOUS_API_KEY"):
+        kwargs["api_key"] = os.environ["NOUS_API_KEY"]
+        kwargs["base_url"] = os.environ.get(
+            "NOUS_BASE_URL", "https://inference-api.nousresearch.com/v1")
+        model = "openai:" + model  # langchain wants 'provider:model'; keep the slash ID
+    return init_chat_model(model, temperature=temperature, **kwargs)
 
 
 # ── 1. Planner ──────────────────────────────────────────────────────────────
 
 def planner(state: AgentState) -> dict:
-    llm = get_llm().with_structured_output(ExecutionPlan)
+    llm = get_llm().with_structured_output(ExecutionPlan, method="function_calling")
     plan = llm.invoke([SystemMessage(content=PLANNER_SYSTEM),
                        HumanMessage(content=state["query"])])
     return {"plan": plan, "iteration": 0, "tool_outputs": [], "messages": [
@@ -134,7 +142,8 @@ def verifier(state: AgentState) -> dict:
     draft = _draft_text(state["messages"][-1])
     claims = []
     try:
-        llm = get_llm().with_structured_output(__import__("pydantic").RootModel[list[DraftClaim]])
+        llm = get_llm().with_structured_output(
+            __import__("pydantic").RootModel[list[DraftClaim]], method="function_calling")
         claims = llm.invoke([SystemMessage(content=VERIFIER_SYSTEM),
                              HumanMessage(content=f"Draft:\n{draft}")]).root
     except Exception:  # noqa: BLE001 — claim extraction must never erase an answer
