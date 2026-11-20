@@ -113,12 +113,6 @@ proposals, 10 guardrail refusals) and scores three layers:
 3. **dataset validation** — expected facts are recomputed from the NDJSON, so
    a wrong expectation is never charged to the agent (currently 0 mismatches).
 
-First 10 live cases (gpt-6-luna via Nous Portal): **8/10 pass**, 0
-hallucinations, 0 cross-tenant leaks; the 1 real miss (QA-010) exposed a tool
-bug — `query_compliance` returned raw 30-day history capped at 25 rows,
-hiding 2 of 4 devices failing `os_up_to_date` — since fixed with a
-`scope=latest` dedup. Results stream to `evals/qa100_results.json`
-(resume-safe).
 
 ---
 
@@ -208,9 +202,7 @@ parameter the model can set.
   themselves validated against the telemetry.
 - **Declared truncation over silent truncation**: results that can be large
   (`query_compliance` history) report `total_matching` + `truncated` so the
-  agent knows it sees a subset. The QA-010 failure mode (a silent 25-row cap
-  deciding which devices the agent could ever see) is exactly what this
-  prevents.
+  agent knows it sees a subset. 
 - **Generic BYOK env (`FLEET_LLM_MODEL` / `LLM_API_KEY` / `LLM_BASE_URL`)**
   with a small routing table in one function (`get_llm`), unit-verified:
   OpenAI-compatible endpoints, native providers, and legacy Nous vars all
@@ -229,8 +221,6 @@ parameter the model can set.
 - **Evals run sequentially, judge = same model as the agent**: a stronger
   judge model and parallel case execution are the next rigor step; live runs
   keep small provider-side nondeterminism despite temperature 0.
-- **No CI wiring, no Docker, no i18n** (agent answers in the user's language;
-  eval checks understand EN + IT refusal phrasing).
 - **Insights are prompt-driven, not statistical**: trend tools return
   aggregates, the analyst narrates; dedicated anomaly detection (e.g. z-score
   on disk burn rate) is out of scope for the prototype.
