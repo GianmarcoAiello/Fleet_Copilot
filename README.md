@@ -97,10 +97,20 @@ clear message (and vice versa).
 ## Evaluation
 
 ```bash
-python evals/run_evals.py            # deterministic: tool-level guardrails, tenant scoping, audit trail (no LLM)
-python evals/run_evals.py --live     # full graph through the real LLM
-python evals/run_qa100.py            # live 100-question suite (see below)
+pip install -e . && pytest tests -q     # deterministic graph tests, stub LLM, no API key
+python evals/run_evals.py               # tool-level guardrails on a hermetic temp DB (no LLM)
+python evals/run_evals.py --live        # full graph through the real LLM
+python evals/run_qa100.py               # live 100-question suite (see below)
 ```
+
+Both eval runners are **hermetic**: the DB is rebuilt from the NDJSON into a
+temp file — nothing under `data/` or git is touched, no API key needed for the
+deterministic suite. `tests/test_graph.py` drives the real LangGraph with a
+stub LLM and asserts the properties that matter: linear message growth (no
+duplicated `tool_call_id` — the reducer bug class), the verifier rejecting
+wrong values / invented timestamps / ungrounded aggregates, invented action
+evidence refused with exactly one audit row, tenant isolation with `config`
+as the single source of truth, and the `get_llm` env routing table.
 
 `evals/run_qa100.py` runs the agent against `fleet_copilot_100_qa.json`
 (100 generated QA pairs: 45 grounded QA, 25 trend insights, 20 action
@@ -143,14 +153,21 @@ never executed inline: they stop the graph at the HITL gate via
 
 | tool | type | notes |
 |---|---|---|
-| `query_fleet_snapshot` | read | latest snapshot per device; filters: os_version_lt, min_avail_disk_gb, check, software |
-| `analyze_time_series_trends` | read | pre-built 30-day aggregates: disk, battery, ram, compliance drift, software |
+| `query_fleet_snapshot` | read | latest snapshot per device **with disk/battery/compliance aggregates joined**; filters combine with AND: min_avail_disk_gb (latest value), os_version_lt (numeric compare, macOS), software, check |
+| `analyze_time_series_trends` | read | pre-built 30-day aggregates: disk, battery, ram, compliance pass→fail transitions (with first fail date), software |
 | `query_device_history` | read | full time-series for one device (tenant-checked) |
-| `query_compliance` | read | `scope=latest` (dedup per device+check) or `scope=all` (history); cap declared with `total_matching`/`truncated` |
-| `create_upgrade_order` | action | component/spec; propose-only |
-| `open_remediation_ticket` | action | check_id/note; propose-only |
-| `flag_device_for_replacement` | action | reason; propose-only |
-| `notify_employee` | action | message for the device's employee; propose-only |
+| `query_compliance` | read | `scope=latest` dedups the **latest result per device+check across all statuses first, then filters**; `scope=all` keeps history; cap declared with `total_matching`/`truncated` |
+| `create_upgrade_order` | action | component/spec; evidence re-read from the DB; sufficiency rule: real RAM (>90%) or disk (<20 GB) pressure, or degraded battery |
+| `open_remediation_ticket` | action | check_id/note; rule: the cited check must be failing on that device right now |
+| `flag_device_for_replacement` | action | rule: battery condition must be 'Service Recommended' |
+| `notify_employee` | action | rule: the device must have an assigned employee |
+
+**Evidence is never trusted from the model**: action tools re-read every
+evidence ref from the tenant-scoped DB (metric + value, 1% numeric tolerance),
+store the DB value in the audit trail, and refuse on mismatch, unknown metric,
+or failed sufficiency rule. Proposals have a single path: the analyst proposes
+through action tools after reading telemetry; the planner cannot invent
+actions.
 
 Tenant id is injected via `RunnableConfig` (`InjectedToolArg`) — it is never a
 parameter the model can set.
@@ -175,12 +192,19 @@ parameter the model can set.
 1. **Tenant isolation** — every query/action is scoped by injected tenant;
    cross-tenant devices are refused and audited; the QA suite checks no
    foreign device id ever appears in an answer.
-2. **Propose-only action tools** — the LLM can create a *proposal*, never
-   execute. Execution requires a human decision that re-enters the graph as a
-   structured `Command(resume=...)`.
-3. **Evidence gate** — an action tool without telemetry evidence refuses
-   (`insufficient evidence`), and the HITL gate refuses *before* asking the
-   human if the target device was never confirmed by a tool result.
+2. **Propose-only action tools + single proposal path** — the LLM can create a
+   *proposal*, never execute. Proposals come only from action tools called by
+   the analyst on DB-verified evidence; execution requires a human decision
+   that re-enters the graph as a structured `Command(resume=…)`. After
+   approval a dedicated executor node flips the action `approved → executed`
+   through a **simulated** connector (documented prototype scope) and writes
+   the `execution` audit event.
+3. **Evidence gate (deterministic)** — an action tool refuses on: missing
+   evidence, evidence value mismatching the DB (1% numeric tolerance), unknown
+   metric, cross-tenant device, or a failed per-action sufficiency rule. The
+   HITL gate is pure (nothing writes before the interrupt, so a resume can
+   never duplicate an audit row) and never asks the human to approve an action
+   on a device no tool result ever confirmed.
 4. **Audit trail** — append-only `audit_log`: proposal → approved/refused,
    with args + evidence JSON and approver id; visible in the web UI and
    `actions_cli.py`.

@@ -20,8 +20,9 @@ Classify the request and emit a short execution plan.
 Rules:
 - intent: 'qa' (current-state question), 'trend_insight' (patterns over the 30-day window),
   'action_request' (user asks to create orders/tickets/flags/notifications), or 'mixed'.
-- Only include action_requests when the user EXPLICITLY asks to perform an action.
 - Steps must be concrete tool tasks ('query disk trends', 'filter devices with <20GB free').
+- You NEVER create action proposals: actions are proposed by the analyst through
+  action tools AFTER reading telemetry, and require human approval.
 """
 
 ANALYST_SYSTEM = """You are the analyst of a Fleet Copilot. You answer ONLY from tool outputs.
@@ -33,7 +34,13 @@ Rules:
   why the pattern matters (e.g. 'capacity down 15% in 30 days → battery near EOL').
 - If tools return nothing relevant, say so — do not extrapolate.
 - For action tools, ALWAYS attach telemetry evidence (device_id, collected_at,
-  metric, value) — an action without evidence will be refused.
+  metric, value) — the metric MUST be a field of the latest snapshot row (e.g.
+  battery_condition, disk_available_bytes, battery_cycle_count, compliance_fails)
+  and values are re-checked against the DB: mismatched or invented evidence is refused.
+- Actions also have sufficiency rules checked on the DB: a remediation ticket
+  needs the cited check currently failing, a replacement flag needs battery
+  'Service Recommended', an upgrade needs real RAM/disk pressure. If the rule
+  fails the tool refuses — do not propose actions without reading telemetry first.
 - Device snapshots include employee_id: use it with notify_employee when the user
   asks to contact or warn a device's user (e.g. unauthorized software found).
 - If the user references a device outside your organization, the tools will refuse: report that.
@@ -111,26 +118,31 @@ def planner(state: AgentState) -> dict:
 # ── 2. Analyst (explicit ReAct loop) ───────────────────────────────────────
 
 def analyst(state: AgentState) -> dict:
-    messages: list[AnyMessage] = state["messages"]
-    if len(messages) == 1:
-        messages = messages + [SystemMessage(content=ANALYST_SYSTEM)]
+    # the state reducer is operator.add: return ONLY the delta, never the
+    # history — re-emitting it duplicates every message every turn (and
+    # duplicate tool_call ids are rejected by OpenAI/Anthropic APIs)
+    history = state["messages"]
+    call_msgs = [SystemMessage(content=ANALYST_SYSTEM), *history]
     # Gemini rejects requests ending on a tool/model turn; close the turn as user.
-    if messages and not isinstance(messages[-1], HumanMessage):
-        messages = messages + [HumanMessage(
+    if history and not isinstance(history[-1], HumanMessage):
+        call_msgs.append(HumanMessage(
             content="Continue: use the tool results above, or call more tools, "
-                    "then write your grounded answer with citations.")]
+                    "then write your grounded answer with citations."))
+    feedback = state.get("reground_feedback")
+    if feedback:
+        call_msgs.append(HumanMessage(content=feedback))
     iteration = state.get("iteration", 0)
     if iteration >= MAX_ITERATIONS:
         # budget exhausted: final forced answer WITHOUT tools bound — the model
         # literally cannot emit new tool calls, so the loop must terminate
-        messages = messages + [HumanMessage(
+        call_msgs.append(HumanMessage(
             content="TOOL BUDGET EXHAUSTED: do not call any tool. Write your final "
                     "grounded answer NOW from the evidence already collected, with "
-                    "citations; if something was not retrieved, say so explicitly.")]
-        out = get_llm().invoke(messages)
+                    "citations; if something was not retrieved, say so explicitly."))
+        out = get_llm().invoke(call_msgs)
     else:
-        out = get_llm().bind_tools(ALL_TOOLS).invoke(messages)
-    return {"messages": messages + [out], "iteration": iteration + 1}
+        out = get_llm().bind_tools(ALL_TOOLS).invoke(call_msgs)
+    return {"messages": [out], "iteration": iteration + 1}
 
 
 def analyst_tools(state: AgentState) -> dict:
@@ -202,6 +214,82 @@ def _draft_text(message) -> str:
         b.get("text", "") for b in content if isinstance(b, dict) and "text" in b)
 
 
+MAX_REGROUND = 1  # informed retry passes: the README promises "one more grounding pass"
+
+
+def _norm_ts(ts) -> str:
+    return str(ts).replace("T", " ").replace("Z", "").strip()[:19]
+
+
+def _fact_index(tool_outputs: list[dict]) -> dict:
+    """(device_id, collected_at) -> {field: value}, built from tool RESULT payloads.
+    The deterministic fact store: evidence refs are checked against this, not
+    against the model's own words."""
+    idx: dict = {}
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            if obj.get("device_id") and obj.get("collected_at"):
+                key = (str(obj["device_id"]), _norm_ts(obj["collected_at"]))
+                bucket = idx.setdefault(key, {})
+                for k, v in obj.items():
+                    bucket.setdefault(k, v)
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    aggs: dict = {}
+    for out in tool_outputs:
+        text = str(out["result"])
+        if text.startswith("error:") or '"error"' in text or '"refused"' in text:
+            continue
+        try:
+            data = json.loads(text)
+        except Exception:
+            continue
+        walk(data)
+        if isinstance(data, dict):
+            for k in ("count", "total_matching"):
+                if k in data:
+                    aggs[k] = data[k]
+    if aggs:
+        idx[("__agg__", "")] = aggs
+    return idx
+
+
+def _claim_problems(c, idx: dict, pool: set[str]) -> list[str]:
+    """Deterministic checks for one claim: device membership, then every
+    EvidenceRef against the fact index (value + timestamp)."""
+    from src.tools.read_tools import _values_match
+    problems: list[str] = []
+    ids = {e.device_id for e in c.evidence} | set(DEVICE_ID_RE.findall(c.claim))
+    if ids and not ids.issubset(pool):
+        problems.append(f"device(s) {sorted(ids - pool)} never confirmed by any tool result")
+    for e in c.evidence:
+        key = (e.device_id, _norm_ts(e.collected_at))
+        bucket = idx.get(key)
+        if bucket is None:
+            # an invented timestamp must be rejected: the analyst cites
+            # collected_at from tool results, which normalize identically
+            problems.append(f"no snapshot fact found for {e.device_id}@{e.collected_at}")
+            continue
+        if e.metric and e.metric in bucket and e.value not in (None, ""):
+            if not _values_match(e.value, bucket[e.metric]):
+                problems.append(f"{e.device_id}@{e.collected_at} {e.metric}: claimed "
+                                f"{e.value!r}, tool results say {bucket[e.metric]!r}")
+    # numbers asserted with no evidence refs: acceptable only if some tool
+    # aggregate (count/total) or fact value actually contains them
+    if not c.evidence:
+        nums = re.findall(r"\d+(?:\.\d+)?", c.claim)
+        if nums:
+            haystack = " ".join(str(v) for bucket in idx.values() for v in bucket.values())
+            if not any(n in haystack for n in nums):
+                problems.append(f"numeric claim without any evidence ref: {c.claim[:120]}")
+    return problems
+
+
 def verifier(state: AgentState) -> dict:
     draft = _draft_text(state["messages"][-1])
     claims = []
@@ -216,102 +304,111 @@ def verifier(state: AgentState) -> dict:
         # fall back: surface the whole draft as a single unverified-but-sourced answer
         claims = [DraftClaim(claim=draft.strip(), evidence=[])]
     pool = _evidence_pool(state.get("tool_outputs", []))
+    idx = _fact_index(state.get("tool_outputs", []))
     verified, unsupported = [], []
     for c in claims:
-        ids = {e.device_id for e in c.evidence} | set(
-            DEVICE_ID_RE.findall(c.claim))
-        if not ids or ids.issubset(pool):
-            verified.append(c)
-        else:
+        if _claim_problems(c, idx, pool):
             unsupported.append(c.claim)
+        else:
+            verified.append(c)
+    attempts = state.get("reground_attempts", 0)
+    feedback = ""
+    if unsupported and attempts < MAX_REGROUND:
+        feedback = ("These claims are NOT supported by the tool results:\n"
+                    + "\n".join(f"- {u}" for u in unsupported)
+                    + "\nEither fetch the missing evidence with a tool call, or remove "
+                      "these claims from your answer.")
     return {"verified_claims": verified, "unsupported": unsupported,
+            "reground_feedback": feedback,
+            "reground_attempts": attempts + (1 if unsupported else 0),
             "response": None}  # clear stale response from a previous loop
 
 
 def verifier_router(state: AgentState) -> str:
-    plan: ExecutionPlan = state["plan"]
-    wants_actions = bool(plan.action_requests)
-    if wants_actions:
+    if _proposed_action_ids(state.get("tool_outputs", [])):
         return "hitl"
-    if state.get("unsupported") and state.get("iteration", 0) < MAX_ITERATIONS:
-        # give the analyst one more pass to ground or drop the unsupported claims
+    if (state.get("unsupported") and state.get("iteration", 0) < MAX_ITERATIONS
+            and state.get("reground_attempts", 0) <= MAX_REGROUND):
         return "re_analyze"
     return "respond"
 
 
-# ── 4. HITL gate ────────────────────────────────────────────────────────────
+# ── 4. HITL gate (single path) + executor ───────────────────────────────────
 
-def hitl_gate(state: AgentState) -> dict:
-    plan: ExecutionPlan = state["plan"]
-    pool = _evidence_pool(state.get("tool_outputs", []))
-    proposals = []
-    for act in plan.action_requests:
-        ok = all(e.device_id in pool for e in act.evidence)
-        # a device never confirmed by any tool result (not found / cross-tenant)
-        # must be refused here, BEFORE asking a human to approve an action on it
-        if act.device_id not in pool:
-            if _REPO_REF is not None:
-                _REPO_REF.audit(state["tenant_id"], event="refusal", tool=act.tool,
-                                args=act.args, evidence=[e.model_dump() for e in act.evidence],
-                                detail=f"device {act.device_id} not confirmed by any tool result")
+ACTION_TOOL_NAMES = {"create_upgrade_order", "open_remediation_ticket",
+                     "flag_device_for_replacement", "notify_employee"}
+
+
+def _proposed_action_ids(tool_outputs: list[dict]) -> list[str]:
+    """Action ids created by the action tools DURING this run — the single
+    proposal path. Planner-invented proposals do not exist anymore."""
+    aids: list[str] = []
+    for out in tool_outputs or []:
+        if out.get("tool") not in ACTION_TOOL_NAMES:
             continue
-        # if the planner sent no structured evidence, harvest device/timestamp
-        # facts for this device from the captured tool outputs so the proposal
-        # is self-contained and auditable
-        # keep evidence typed as EvidenceRef; dump to dicts only at the repo/interrupt boundary
-        evidence = list(act.evidence)
-        if not evidence:
-            for out in state.get("tool_outputs", []):
-                text = str(out["result"])
-                if text.startswith("error:") or '"error"' in text or '"refused"' in text:
-                    continue  # never fabricate evidence from a failed lookup
-                if act.device_id in text:
-                    ts = re.search(rf"{act.device_id}\|(\d{{4}}-\d{{2}}-\d{{2}}T[^\"']*)", text)
-                    if ts:
-                        evidence = [EvidenceRef(device_id=act.device_id,
-                                     collected_at=ts.group(1)[:19],
-                                     metric="snapshot",
-                                     value=f"referenced in {out['tool']} output")]
-                        break
-        # link to the real DB action created by the tool call (if any), so the
-        # UI can resolve it by id without a second lookup
-        real = None
-        if _REPO_REF is not None:
-            row = _REPO_REF.con.execute(
-                "SELECT action_id FROM actions WHERE company_id=? AND status='proposed' "
-                "AND tool=? AND device_id=? ORDER BY created_at DESC LIMIT 1",
-                (state["tenant_id"], act.tool, act.device_id)).fetchone()
-            real = row[0] if row else None
-        proposals.append(act.model_copy(update={
-            "action_id": real or f"unproposed_{len(proposals)}",
-            "evidence": evidence,
-            "rationale": act.rationale or ("evidence-grounded" if ok else "INSUFFICIENT EVIDENCE")}))
+        try:
+            r = json.loads(str(out["result"]))
+        except Exception:
+            continue
+        if r.get("proposed") and r.get("action_id"):
+            if r["action_id"] not in aids:
+                aids.append(r["action_id"])
+    return aids
+
+
+def _tenant_of(state: AgentState, config=None) -> str:
+    # config is the single source of truth for the tenant (injected at invoke)
+    t = (config or {}).get("configurable", {}).get("tenant_id")
+    return t or state.get("tenant_id", "")
+
+
+def hitl_gate(state: AgentState, config=None) -> dict:
+    """Pure gate: nothing writes before the interrupt, so a resume can never
+    duplicate an audit row. Proposals are read from the DB (source of truth)."""
+    repo = _REPO_REF
+    tenant = _tenant_of(state, config)
+    aids = _proposed_action_ids(state.get("tool_outputs", []))
+    proposals = repo.get_actions(tenant, aids) if (repo is not None and aids) else []
     if not proposals:
-        # every action was refused pre-gate: never bother the human with an empty ask
-        return {"approval": None, "approved": False}
-    decision = interrupt({
-        "proposed_actions": [p.model_dump() for p in proposals],
-        "evidence_pool": sorted(_evidence_pool(state.get("tool_outputs", []))),
-        "message": "Approve these actions? Resume with Command(resume={'approved': bool, 'approver': str})",
-    })
-    approved = bool(decision.get("approved"))
-    approver = str(decision.get("approver") or "human")
-    # proposals that never reached the action tools (no DB row yet) are created
-    # and resolved here, so approval always leaves a complete audit trail
-    if _REPO_REF is not None:
-        for p in proposals:
-            if p.action_id.startswith("unproposed_"):
-                if approved and p.device_id in _evidence_pool(state.get("tool_outputs", [])):
-                    real = _REPO_REF.propose_action(
-                        state["tenant_id"], p.device_id, p.tool, p.args,
-                        [e.model_dump() for e in p.evidence])
-                    _REPO_REF.resolve_action(state["tenant_id"], real, True, approver)
-                    p.action_id = real
-                else:
-                    _REPO_REF.audit(state["tenant_id"], event="refusal", tool=p.tool,
-                                    args=p.args, evidence=[e.model_dump() for e in p.evidence],
-                                    detail="unproposed action rejected or ungrounded")
-    return {"approval": decision, "approved": approved}
+        # no action proposed (or all refused at tool level): no human ask
+        return {"approval": None, "approved": False, "approved_action_ids": []}
+    pending = [p for p in proposals if p["status"] == "proposed"]
+    if pending:
+        decision = interrupt({
+            "proposed_actions": proposals,
+            "message": "Approve these actions? Resume with Command(resume={'approved': bool, 'approver': str})",
+        })
+        approved = bool(decision.get("approved"))
+        approver = str(decision.get("approver") or "human")
+        # resolve_action is idempotent (status='proposed' guard): resolving here
+        # and from the web UI never double-audits
+        for p in pending:
+            repo.resolve_action(tenant, p["action_id"], approved, approver)
+    else:
+        # the decision was already taken elsewhere (web UI Pending tab):
+        # reflect it so the executor still runs on approval
+        approved = all(p["status"] == "approved" for p in proposals)
+        decision = {"approved": approved, "approver": "pre-resolved"}
+    return {"approval": decision, "approved": approved,
+            "approved_action_ids": [p["action_id"] for p in proposals
+                                    if approved and p["status"] in ("approved", "executed")]}
+
+
+def hitl_router(state: AgentState) -> str:
+    return "execute" if state.get("approved") else "respond"
+
+
+def executor(state: AgentState, config=None) -> dict:
+    """approved -> executed, via a SIMULATED connector (documented prototype
+    scope: no real ticketing/email). Writes the `execution` audit event."""
+    repo = _REPO_REF
+    tenant = _tenant_of(state, config)
+    executed = []
+    if repo is not None:
+        for aid in state.get("approved_action_ids", []):
+            if repo.execute_action(tenant, aid):
+                executed.append(aid)
+    return {"executed_action_ids": executed}
 
 
 # ── 5. Formatter ────────────────────────────────────────────────────────────
@@ -330,12 +427,11 @@ def formatter(state: AgentState) -> dict:
     if state.get("approval") is not None:
         parts.append(f"HITL decision: {'APPROVED' if state.get('approved') else 'REJECTED'} "
                      f"by {state.get('approval', {}).get('approver', 'unknown')}")
+    if state.get("executed_action_ids"):
+        parts.append(f"Executed via simulated connector: {', '.join(state['executed_action_ids'])}")
     parts.append(f"(plan intent: {state['plan'].intent}; tool calls: "
                  f"{len(state.get('tool_outputs', []))})")
     return {"response": "\n\n".join(parts)}
-
-
-_REPO_REF = None  # set by build_workflow; used by hitl_gate for action-id linkage
 
 
 def build_workflow(repo, checkpointer=None):
@@ -350,6 +446,7 @@ def build_workflow(repo, checkpointer=None):
     g.add_node("execute_tools", analyst_tools)
     g.add_node("verifier", verifier)
     g.add_node("hitl", hitl_gate)
+    g.add_node("executor", executor)
     g.add_node("formatter", formatter)
     g.set_entry_point("planner")
     g.add_edge("planner", "analyst")
@@ -359,6 +456,8 @@ def build_workflow(repo, checkpointer=None):
     g.add_conditional_edges("verifier", verifier_router,
                             {"hitl": "hitl", "respond": "formatter",
                              "re_analyze": "analyst"})
-    g.add_edge("hitl", "formatter")
+    g.add_conditional_edges("hitl", hitl_router,
+                            {"execute": "executor", "respond": "formatter"})
+    g.add_edge("executor", "formatter")
     g.add_edge("formatter", END)
     return g.compile(checkpointer=checkpointer)

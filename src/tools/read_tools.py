@@ -33,39 +33,45 @@ def _slim(rows: list[dict], max_rows: int = 25) -> list[dict]:
 
 # ── read tools ──────────────────────────────────────────────────────────────
 
+def _ver_tuple(v: str | None):
+    """'14.5' -> (14, 5): OS versions compare numerically, never as strings."""
+    import re
+    nums = re.findall(r"\d+", (v or "").split()[0]) if v else []
+    return tuple(int(x) for x in nums)
+
+
 @tool
 def query_fleet_snapshot(
     config: Annotated[RunnableConfig, InjectedToolArg],
-    filters: Optional[str] = Field(
-        default=None,
-        description="Optional free-text description of the filter intent (e.g. 'macOS 15+'). "
-                    "Predefined filters: os_version_lt=X, min_avail_disk_gb=X, check=ID, "
-                    "software=NAME",
-    ),
-    min_avail_disk_gb: Optional[float] = None,
-    os_version_lt: Optional[str] = None,
-    software: Optional[str] = None,
+    min_avail_disk_gb: Optional[float] = Field(
+        default=None, description="Latest snapshot: devices with less free disk than this (GB)"),
+    os_version_lt: Optional[str] = Field(
+        default=None, description="macOS version filter, numeric compare (applies to macOS devices only)"),
+    software: Optional[str] = Field(default=None, description="Devices with this software installed"),
+    check: Optional[str] = Field(
+        default=None, description="Devices currently failing this compliance check "
+                                  "(disk_encryption | screen_lock | os_up_to_date)"),
 ) -> str:
-    """Latest snapshot per device for the caller's company. Use for current-state questions."""
+    """Latest snapshot per device for the caller's company, with disk, battery and
+    compliance aggregates. Filters combine with AND. Use for current-state questions."""
     t = _tenant(config)
     assert _repo is not None
+    sql_filters, sql_params = [], []
+    if software:
+        sql_filters.append(
+            "s.device_id IN (SELECT device_id FROM installed_software "
+            "WHERE company_id = ? AND name = ?)")
+        sql_params += [t, software]
+    rows = _repo.latest_snapshots(t, " AND ".join(sql_filters), tuple(sql_params))
     if min_avail_disk_gb is not None:
-        rows = _repo.latest_snapshots(
-            t,
-            "s.device_id IN (SELECT device_id FROM disk_volumes WHERE company_id = ? "
-            "GROUP BY device_id HAVING min(available_bytes)/1e9 < ?)",
-            (t, min_avail_disk_gb),
-        )
-    elif software:
-        rows = _repo.latest_snapshots(
-            t,
-            "s.device_id IN (SELECT device_id FROM installed_software WHERE company_id=? AND name=?)",
-            (t, software),
-        )
-    elif os_version_lt:
-        rows = _repo.latest_snapshots(t, "s.os_version < ?", (os_version_lt,))
-    else:
-        rows = _repo.latest_snapshots(t)
+        rows = [r for r in rows if r.get("disk_available_bytes") is not None
+                and r["disk_available_bytes"] / 1e9 < min_avail_disk_gb]
+    if os_version_lt:
+        rows = [r for r in rows if r.get("os_platform") == "darwin"
+                and _ver_tuple(r.get("os_version")) < _ver_tuple(os_version_lt)]
+    if check:
+        rows = [r for r in rows
+                if check in [c.strip() for c in (r.get("failed_checks") or "").split(",")]]
     return json.dumps({"count": len(rows), "rows": _slim(rows)}, default=str)
 
 
@@ -82,12 +88,10 @@ def analyze_time_series_trends(
     if fn:
         return json.dumps({"trend": trend, "rows": _slim(fn(t))}, default=str)
     if trend == "compliance":
-        fails = _repo.compliance(t, status="fail")
-        drift: dict[str, list] = {}
-        for r in fails:
-            drift.setdefault(r["device_id"], []).append(
-                {"check": r["check_id"], "sev": r["severity"], "at": str(r["collected_at"])})
-        return json.dumps({"trend": "compliance", "devices_with_fails": drift}, default=str)
+        # pre-computed pass -> fail transitions with first fail date — the model
+        # cannot be asked to diff 25k chars of raw fail rows
+        return json.dumps({"trend": "compliance", **_repo.compliance_transitions(t)},
+                          default=str)
     if trend == "software":
         return json.dumps({"trend": "software", "rows": _repo.software_events(t)}, default=str)
     return json.dumps({"error": f"unknown trend '{trend}', pick disk|battery|ram|compliance|software"})
@@ -119,16 +123,24 @@ def query_compliance(
     """Compliance results across all devices of the caller's company."""
     t = _tenant(config)
     assert _repo is not None
-    rows = _repo.compliance(t, status, severity)  # ordered device_id, collected_at DESC
-    if scope != "all":
+    if scope == "all":
+        rows = _repo.compliance(t, status, severity)
+        total = len(rows)
+        slim = _slim(rows, 40)
+    else:
+        # dedup on ALL statuses first: the latest result per device+check decides,
+        # THEN filter — a remediated device must not resurface as failing
+        rows = _repo.compliance(t, severity=severity)
         latest: dict[tuple, dict] = {}
-        for r in rows:  # first occurrence per key = most recent snapshot
+        for r in rows:  # ordered device_id, collected_at DESC
             key = (r["device_id"], r["check_id"])
             if key not in latest:
                 latest[key] = r
         rows = list(latest.values())
-    total = len(rows)
-    slim = _slim(rows, 40)
+        if status:
+            rows = [r for r in rows if r["status"] == status]
+        total = len(rows)
+        slim = _slim(rows, 40)
     out: dict = {"rows": slim, "total_matching": total}
     if total > len(slim):
         out["truncated"] = True
@@ -168,6 +180,64 @@ class _NotifyArgs(BaseModel):
     rationale: str = ""
 
 
+def _values_match(provided, db_value) -> bool:
+    """Model-provided evidence value vs DB value: exact/normalised for strings,
+    1% tolerance for numbers. A mismatch means the evidence is invented."""
+    if provided is None:
+        return True
+    if isinstance(db_value, (int, float)) and not isinstance(db_value, bool):
+        try:
+            p = float(str(provided).replace(",", "").rstrip("%"))
+        except ValueError:
+            return False
+        if db_value == 0:
+            return p == 0
+        return abs(p - float(db_value)) <= abs(float(db_value)) * 0.01
+    return str(provided).strip().lower() == str(db_value).strip().lower()
+
+
+_METRIC_ALIASES = {  # analyst-facing name -> latest-snapshot row field
+    "cycle_count": "battery_cycle_count",
+    "battery_cycles": "battery_cycle_count",
+    "full_charge_capacity": "battery_cycle_count",
+    "condition": "battery_condition",
+    "free_disk_bytes": "disk_available_bytes",
+    "disk_free_bytes": "disk_available_bytes",
+    "available_bytes": "disk_available_bytes",
+}
+
+
+def _sufficiency(name: str, row: dict, args: dict) -> tuple[bool, str]:
+    """Per-action minimum-evidence rule, checked against the DB — this is the
+    real 'refuse without sufficient evidence' guardrail."""
+    if name == "open_remediation_ticket":
+        failed = [c.strip() for c in (row.get("failed_checks") or "").split(",") if c.strip()]
+        if args.get("check_id") not in failed:
+            return False, (f"check '{args.get('check_id')}' is not currently failing on "
+                           f"{row['device_id']} (failed now: {failed or 'none'})")
+    elif name == "flag_device_for_replacement":
+        if row.get("battery_condition") != "Service Recommended":
+            return False, (f"battery condition is '{row.get('battery_condition')}', "
+                           "not 'Service Recommended' — no replacement grounds")
+    elif name == "create_upgrade_order":
+        comp = (args.get("component") or "").lower()
+        if comp == "ram":
+            total, used = row.get("ram_total_bytes"), row.get("ram_used_bytes")
+            if not total or used / total < 0.9:
+                return False, f"RAM pressure is below the 90% upgrade threshold on {row['device_id']}"
+        elif comp == "disk":
+            avail = row.get("disk_available_bytes")
+            if avail is None or avail / 1e9 >= 20:
+                return False, f"free disk is at/above 20 GB on {row['device_id']} — no upgrade grounds"
+        elif comp == "battery":
+            if row.get("battery_condition") == "Normal":
+                return False, f"battery condition is Normal on {row['device_id']}"
+    elif name == "notify_employee":
+        if not row.get("employee_id"):
+            return False, f"device {row['device_id']} has no assigned employee to notify"
+    return True, ""
+
+
 def _make_action_tool(name: str, description: str, schema: type[BaseModel]):
     @tool(name, description=description, args_schema=schema)
     def _act(config: Annotated[RunnableConfig, InjectedToolArg],
@@ -175,17 +245,41 @@ def _make_action_tool(name: str, description: str, schema: type[BaseModel]):
         t = _tenant(config)
         assert _repo is not None
         args = {k: v for k, v in kwargs.items()}
+
+        def refuse(reason: str) -> str:
+            _repo.audit(t, event="refusal", tool=name, args=args,
+                        evidence=evidence if isinstance(evidence, list) else [],
+                        detail=reason)
+            return json.dumps({"refused": True, "reason": reason})
+
         if not _repo.device_exists(t, device_id):
-            _repo.audit(t, event="refusal", tool=name, args=args, evidence=evidence,
-                        detail=f"unknown or cross-tenant device {device_id}")
-            return json.dumps({"refused": True,
-                               "reason": f"device '{device_id}' not found in your organization"})
+            return refuse(f"unknown or cross-tenant device {device_id}")
         if not evidence:
-            _repo.audit(t, event="refusal", tool=name, args=args, evidence=[],
-                        detail="no evidence supplied")
-            return json.dumps({"refused": True,
-                               "reason": "insufficient evidence: cite telemetry facts first"})
-        action_id = _repo.propose_action(t, device_id, name, args, evidence)
+            return refuse("insufficient evidence: cite telemetry facts first")
+
+        # the model's evidence values are NEVER trusted: re-read every ref from
+        # the DB (tenant-scoped) and store the DB value in the audit trail
+        row = _repo.latest_snapshot_row(t, device_id)
+        if row is None:
+            return refuse(f"no snapshot found for {device_id}")
+        verified = []
+        for ref in evidence:
+            if not isinstance(ref, dict) or not ref.get("metric"):
+                return refuse(f"malformed evidence ref: {ref!r} — need at least a metric name")
+            metric = _METRIC_ALIASES.get(ref["metric"], ref["metric"])
+            if metric not in row or row[metric] is None:
+                return refuse(f"evidence metric '{ref['metric']}' not found on the "
+                              f"latest snapshot of {device_id}")
+            if not _values_match(ref.get("value"), row[metric]):
+                return refuse(f"evidence value mismatch for '{ref['metric']}': you said "
+                              f"{ref.get('value')!r}, the DB says {row[metric]!r}")
+            verified.append({"device_id": device_id,
+                             "collected_at": str(row["collected_at"])[:19],
+                             "metric": metric, "value": row[metric]})
+        ok, why = _sufficiency(name, row, args)
+        if not ok:
+            return refuse(f"insufficient grounds: {why}")
+        action_id = _repo.propose_action(t, device_id, name, args, verified)
         return json.dumps({"proposed": True, "action_id": action_id,
                            "note": "awaiting explicit human approval"})
     return _act

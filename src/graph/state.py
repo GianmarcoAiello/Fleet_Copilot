@@ -31,7 +31,6 @@ class ProposedAction(BaseModel):
 class ExecutionPlan(BaseModel):
     intent: Literal["qa", "trend_insight", "action_request", "mixed"]
     steps: list[str] = Field(description="Concrete ordered steps for the analyst")
-    action_requests: list[ProposedAction] = Field(default_factory=list)
 
 
 class DraftClaim(BaseModel):
@@ -54,8 +53,12 @@ class AgentState(TypedDict, total=False):
     draft_claims: list[DraftClaim]
     verified_claims: list[DraftClaim]
     unsupported: list[str]
+    reground_feedback: str
+    reground_attempts: int
     # HITL
     pending_actions: list[ProposedAction]
+    approved_action_ids: list[str]
+    executed_action_ids: list[str]
     approved: Optional[bool]
     approval: Optional[dict]          # Command(resume=...) payload
     # output

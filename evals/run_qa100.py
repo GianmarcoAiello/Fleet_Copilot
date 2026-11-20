@@ -35,7 +35,7 @@ from pydantic import BaseModel  # noqa: E402
 from src.db.loader import Repository, load_ndjson  # noqa: E402
 from src.graph.nodes import build_workflow, get_llm  # noqa: E402
 
-QA_PATH = Path("/Users/gianmarcoaiello/Downloads/fleet_copilot_100_qa.json")
+QA_PATH = ROOT / "evals" / "fleet_copilot_100_qa.json"
 NDJSON = ROOT / "device-telemetry-dataset.ndjson"
 RESULTS_PATH = ROOT / "evals" / "qa100_results.json"
 

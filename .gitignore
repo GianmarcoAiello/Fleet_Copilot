@@ -1,5 +1,20 @@
+# runtime noise
+.DS_Store
+*.duckdb
+*.duckdb.wal
+data/          # rebuilt from device-telemetry-dataset.ndjson at the root
+
+# local working docs & design context (not part of the deliverable)
+AGENTS.md
+SESSION_STATE.md
+PRODUCT.md
+pre-analysis.rtf
+.impeccable/
+
+# secrets
+.env
+
+# python
 .venv/
 __pycache__/
 *.pyc
-.env
-.env

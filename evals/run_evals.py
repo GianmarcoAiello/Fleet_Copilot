@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +27,7 @@ load_dotenv(ROOT / ".env")
 from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 
-from src.db.loader import Repository  # noqa: E402
+from src.db.loader import Repository, load_ndjson  # noqa: E402
 from src.graph.nodes import build_workflow  # noqa: E402
 from src.tools.read_tools import ALL_TOOLS, set_repo  # noqa: E402
 
@@ -34,7 +35,11 @@ RESULTS: list[dict] = []
 
 
 def fresh_repo() -> Repository:
-    return Repository(ROOT / "data" / "fleet.duckdb")
+    """Hermetic: a temp DB rebuilt from the NDJSON — evals never touch
+    data/fleet.duckdb (tracked in git once, then gitignored) or any real file."""
+    tmp = Path(tempfile.mkdtemp()) / "evals.duckdb"
+    load_ndjson(tmp, ROOT / "device-telemetry-dataset.ndjson")
+    return Repository(tmp)
 
 
 def run_graph(case: dict, repo: Repository) -> dict:
@@ -53,6 +58,8 @@ def check(case: dict, obs: dict) -> list[str]:
     failures = []
     exp = case["expect"]
     state, tools = obs["state"], obs["tools"]
+    repo = obs["repo"]
+    tenant = case["tenant"]
     for t in exp.get("tool_calls_contains", []):
         if t not in tools:
             failures.append(f"missing tool call: {t}")
@@ -65,22 +72,35 @@ def check(case: dict, obs: dict) -> list[str]:
     vclaims = state.get("verified_claims", [])
     if len(vclaims) < exp.get("min_verified_claims", 0):
         failures.append(f"verified claims {len(vclaims)} < {exp['min_verified_claims']}")
-    if exp.get("must_cite_device_ids") and "@" not in resp:
-        failures.append("no evidence citations (@) in response")
+    if exp.get("must_cite_device_ids") and "@" not in resp and "device_id=" not in resp:
+        failures.append("no evidence citations in response")
     if exp.get("refuses") and not any(
             k in resp.lower() for k in ("not found", "refus", "cannot", "no data",
-                                        "no telemetry", "no evidence", "do not have")):
+                                        "no telemetry", "no evidence", "do not have",
+                                        "non posso", "nessun", "non risult")):
         failures.append("expected refusal language, got none")
     if exp.get("interrupt_raised") and not obs["interrupted"]:
         failures.append("expected HITL interrupt, none raised")
+    if "no_action_tables_written" in exp and exp["no_action_tables_written"]:
+        n = repo.con.execute("SELECT count(*) FROM actions WHERE company_id=?",
+                             (tenant,)).fetchone()[0]
+        if n:
+            failures.append(f"{n} action rows written for a refusal case")
+    if "refuses_or_no_ungrounded_actions" in exp and exp["refuses_or_no_ungrounded_actions"]:
+        refused_lang = any(k in resp.lower() for k in ("refus", "not found", "non posso", "nessun"))
+        n = repo.con.execute("SELECT count(*) FROM actions WHERE company_id=?",
+                             (tenant,)).fetchone()[0]
+        if not refused_lang and n:
+            failures.append("no refusal language AND actions were written")
+    if "audit_has_events" in exp and exp["audit_has_events"]:
+        if not repo.audit_tail(tenant, limit=1):
+            failures.append("audit log empty, expected events")
     if "actions_status_after" in exp:
-        status = None
-        for e in reversed(state.get("audit_refs", []) or []):
-            pass
-        # resolve from audit tail is repo-side; simpler: response mentions decision
-        want = exp["actions_status_after"]
-        if want not in resp.lower():
-            failures.append(f"response does not reflect '{want}' decision")
+        # the decision must exist as an audit event, not just as response prose
+        want = exp["actions_status_after"].lower()
+        events = [e["event"] for e in repo.audit_tail(tenant, limit=10)]
+        if want not in events:
+            failures.append(f"audit tail lacks '{want}' event (has {events})")
     return failures
 
 
@@ -90,6 +110,7 @@ def run_live(all_cases: list[dict]) -> None:
         set_repo(repo)
         try:
             obs = run_graph(case, repo)
+            obs["repo"] = repo
             fails = check(case, obs)
             RESULTS.append({"id": case["id"], "pass": not fails, "failures": fails})
         except Exception as exc:  # noqa: BLE001
@@ -127,10 +148,13 @@ def run_mock(all_cases: list[dict]) -> None:
                     "failures": [] if ok else [r]})
 
     # 4. proper action proposes, HITL resolution via repo API
-    r = tmap["create_upgrade_order"].invoke(
-        {"device_id": "1LYSSFD074BB", "component": "battery", "spec": "replacement",
-         "evidence": [{"device_id": "1LYSSFD074BB", "collected_at": "2026-06-12T09:47:00Z",
-                       "metric": "battery.condition", "value": "Normal"}]},
+    # pick a device that actually meets the sufficiency rule (battery degraded)
+    row = repo.latest_snapshot_row("acme-001", "M4XVHUV1MEPZ")
+    assert row.get("battery_condition") == "Service Recommended", row.get("battery_condition")
+    r = tmap["flag_device_for_replacement"].invoke(
+        {"device_id": "M4XVHUV1MEPZ", "reason": "battery degraded",
+         "evidence": [{"device_id": "M4XVHUV1MEPZ", "collected_at": "2026-06-12T11:00:00Z",
+                       "metric": "battery_condition", "value": "Service Recommended"}]},
         config=cfg)
     aid = json.loads(r).get("action_id")
     ok = bool(aid)

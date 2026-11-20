@@ -12,6 +12,7 @@ import os
 import time
 import uuid
 from pathlib import Path
+from typing import Optional
 
 import duckdb
 
@@ -41,7 +42,9 @@ CREATE TABLE IF NOT EXISTS disk_volumes (
     company_id     VARCHAR,
     volume_name    VARCHAR,
     file_system    VARCHAR,
-    total_bytes    BIGINT,
+    mount_point    VARCHAR,
+    encrypted      BOOLEAN,
+    total_bytes    BIGINT,   -- dataset field: size_bytes
     available_bytes BIGINT
 );
 CREATE TABLE IF NOT EXISTS battery (
@@ -107,7 +110,8 @@ def _flat(r: dict) -> tuple[list, list, list, list, list]:
     disks, bats, comps, softs = [], [], [], []
     for v in r.get("disk_volumes") or []:
         disks.append((sid, r["device_id"], r["company_id"], v.get("volume_name"),
-                      v.get("file_system"), v.get("total_bytes"), v.get("available_bytes")))
+                      v.get("file_system"), v.get("mount_point"), v.get("encrypted"),
+                      v.get("size_bytes"), v.get("available_bytes")))
     b = r.get("battery") or {}
     bats.append((sid, r["device_id"], r["company_id"], b.get("battery_present"),
                  b.get("percentage"), b.get("condition"), b.get("cycle_count"),
@@ -120,6 +124,18 @@ def _flat(r: dict) -> tuple[list, list, list, list, list]:
     return snaps, disks, bats, comps, softs
 
 
+def _insert_many(con, table: str, rows: list[tuple], ncols: int) -> None:
+    """Fast multi-row INSERT: duckdb executemany pays per-row overhead
+    (~1-3s per table on this dataset); chunked VALUES is ~50x faster."""
+    if not rows:
+        return
+    ph = "(" + ",".join(["?"] * ncols) + ")"
+    for i in range(0, len(rows), 500):
+        part = rows[i:i + 500]
+        sql = f"INSERT INTO {table} SELECT * FROM (VALUES " + ",".join([ph] * len(part)) + ")"
+        con.execute(sql, [v for r in part for v in r])
+
+
 def load_ndjson(db_path: str | os.PathLike, ndjson_path: str | os.PathLike) -> int:
     """Load NDJSON into a fresh DuckDB file. Returns number of snapshots."""
     Path(db_path).unlink(missing_ok=True)
@@ -130,11 +146,11 @@ def load_ndjson(db_path: str | os.PathLike, ndjson_path: str | os.PathLike) -> i
         for line in f:
             s, d, b, c, w = _flat(json.loads(line))
             snaps += s; disks += d; bats += b; comps += c; softs += w
-    con.executemany("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", snaps)
-    con.executemany("INSERT INTO disk_volumes VALUES (?,?,?,?,?,?,?)", disks)
-    con.executemany("INSERT INTO battery VALUES (?,?,?,?,?,?,?,?)", bats)
-    con.executemany("INSERT INTO compliance_results VALUES (?,?,?,?,?,?)", comps)
-    con.executemany("INSERT INTO installed_software VALUES (?,?,?,?,?)", softs)
+    _insert_many(con, "snapshots", snaps, 15)
+    _insert_many(con, "disk_volumes", disks, 9)
+    _insert_many(con, "battery", bats, 8)
+    _insert_many(con, "compliance_results", comps, 6)
+    _insert_many(con, "installed_software", softs, 5)
     n = con.execute("SELECT count(*) FROM snapshots").fetchone()[0]
     con.close()
     return n
@@ -169,16 +185,22 @@ class Repository:
             SELECT s.*,
                    dv.total_bytes     AS disk_total_bytes,
                    dv.available_bytes AS disk_available_bytes,
+                   CASE WHEN dv.total_bytes > 0
+                        THEN dv.available_bytes::DOUBLE / dv.total_bytes END
+                                      AS disk_free_pct,
                    b.percentage       AS battery_percentage,
                    b.condition        AS battery_condition,
                    b.cycle_count      AS battery_cycle_count,
-                   cf.fails           AS compliance_fails
+                   cf.fails           AS compliance_fails,
+                   cf.failed_checks   AS failed_checks
             FROM snapshots s
             LEFT JOIN (SELECT snapshot_id, SUM(total_bytes)     AS total_bytes,
                               SUM(available_bytes)              AS available_bytes
                        FROM disk_volumes GROUP BY snapshot_id) dv USING (snapshot_id)
             LEFT JOIN battery b USING (snapshot_id)
-            LEFT JOIN (SELECT snapshot_id, COUNT(*) AS fails FROM compliance_results
+            LEFT JOIN (SELECT snapshot_id, COUNT(*) AS fails,
+                              string_agg(check_id, ',') AS failed_checks
+                       FROM compliance_results
                        WHERE status = 'fail' GROUP BY snapshot_id) cf USING (snapshot_id)
             WHERE s.company_id = ?
               AND s.collected_at = (SELECT max(collected_at) FROM snapshots w
@@ -190,6 +212,11 @@ class Repository:
         ).fetchall()
         cols = [d[0] for d in self.con.description]
         return [dict(zip(cols, r)) for r in rows]
+
+    def latest_snapshot_row(self, tenant_id: str, device_id: str) -> Optional[dict]:
+        """The single latest joined row for one device (evidence re-reads)."""
+        rows = self.latest_snapshots(tenant_id, "s.device_id = ?", (device_id,))
+        return rows[0] if rows else None
 
     def device_history(self, tenant_id: str, device_id: str, limit: int = 30) -> list[dict]:
         rows = self.con.execute(
@@ -330,6 +357,62 @@ class Repository:
                    args=json.loads(row[2]), evidence=[],
                    detail=f"action_id={action_id}")
         return True
+
+    def get_actions(self, tenant_id: str, action_ids: list[str]) -> list[dict]:
+        """Full payloads for the HITL gate — any status, so a decision already
+        taken elsewhere (web UI resolve) is reflected instead of lost. The DB
+        is the source of truth, not model output."""
+        out = []
+        for aid in action_ids:
+            row = self.con.execute(
+                "SELECT action_id, tool, device_id, args_json, status FROM actions "
+                "WHERE action_id=? AND company_id=?",
+                (aid, tenant_id)).fetchone()
+            if not row:
+                continue
+            ev = self.con.execute(
+                "SELECT evidence_json FROM audit_log WHERE tenant_id=? AND event='proposal' "
+                "AND detail=? ORDER BY ts DESC LIMIT 1",
+                (tenant_id, f"action_id={aid}")).fetchone()
+            out.append({"action_id": row[0], "tool": row[1], "device_id": row[2],
+                        "args": json.loads(row[3]), "status": row[4],
+                        "evidence": json.loads(ev[0]) if ev else []})
+        return out
+
+    def execute_action(self, tenant_id: str, action_id: str,
+                       connector: str = "simulated") -> bool:
+        """approved -> executed, with a `execution` audit event. The connector is
+        a documented simulation (no real ticketing/email in the prototype)."""
+        row = self.con.execute(
+            "SELECT company_id, tool, args_json FROM actions WHERE action_id=? AND status='approved'",
+            (action_id,)).fetchone()
+        if not row or row[0] != tenant_id:
+            return False
+        self.con.execute("UPDATE actions SET status='executed' WHERE action_id=?", (action_id,))
+        self.audit(tenant_id, approver=connector, event="execution", tool=row[1],
+                   args=json.loads(row[2]), evidence=[],
+                   detail=f"action_id={action_id} executed via simulated {connector} connector")
+        return True
+
+    def compliance_transitions(self, tenant_id: str) -> dict:
+        """pass -> fail transitions with the first fail date per (device, check):
+        pre-computed drift, so the model does not have to diff 25k chars of rows."""
+        rows = self.con.execute(
+            """
+            SELECT device_id, check_id, status, collected_at, severity
+            FROM compliance_results WHERE company_id = ?
+            ORDER BY device_id, check_id, collected_at
+            """,
+            (tenant_id,)).fetchall()
+        last: dict[tuple, str] = {}
+        out: dict[str, list] = {}
+        for dev, check, status, ts, sev in rows:
+            key = (dev, check)
+            if status == "fail" and last.get(key) == "pass":
+                out.setdefault(dev, []).append(
+                    {"check": check, "severity": sev, "first_fail_at": str(ts)})
+            last[key] = status
+        return {"transitions": out}
 
     def audit(self, tenant_id: str, event: str, tool: str, args: dict,
               evidence: list[dict], detail: str = "", approver: str = "") -> str:

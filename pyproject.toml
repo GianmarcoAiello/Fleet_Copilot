@@ -5,6 +5,7 @@ description = "Agentic AI Fleet Copilot — take-home assessment (Rayda)"
 requires-python = ">=3.12"
 dependencies = [
     "duckdb>=2.0",
+    "pytz",
     "langgraph>=1.2",
     "langchain-core>=1.8",
     "langchain>=1.5",
