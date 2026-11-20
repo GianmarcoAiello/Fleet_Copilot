@@ -78,23 +78,30 @@ def query_fleet_snapshot(
 @tool
 def analyze_time_series_trends(
     config: Annotated[RunnableConfig, InjectedToolArg],
-    trend: str = Field(description="One of: disk | battery | ram | compliance | software"),
+    trend: str = Field(description="One of: disk | battery | ram | compliance | "
+                                  "software | gaps | versions"),
 ) -> str:
-    """Pre-built 30-day trend analyses for the caller's company. Returns per-device aggregates."""
+    """Pre-built 30-day trend analyses for the caller's company: disk (per-device
+    first/last/min free space with dates), battery (cycles + daily cycle rate),
+    ram, compliance (pass→fail drift), software (installs with first/last seen,
+    version), gaps (snapshots missing network/battery telemetry, with dates),
+    versions (OS/agent version changes over the window)."""
     t = _tenant(config)
     assert _repo is not None
     fn = {"disk": _repo.disk_trend, "battery": _repo.battery_report,
-          "ram": _repo.ram_pressure}.get(trend)
+          "ram": _repo.ram_pressure, "gaps": _repo.telemetry_gaps,
+          "versions": _repo.version_changes}.get(trend)
     if fn:
         return json.dumps({"trend": trend, "rows": _slim(fn(t))}, default=str)
     if trend == "compliance":
         # pre-computed pass -> fail transitions with first fail date — the model
         # cannot be asked to diff 25k chars of raw fail rows
-        return json.dumps({"trend": "compliance", **_repo.compliance_transitions(t)},
+        return json.dumps({trend: "compliance", **_repo.compliance_transitions(t)},
                           default=str)
     if trend == "software":
-        return json.dumps({"trend": "software", "rows": _repo.software_events(t)}, default=str)
-    return json.dumps({"error": f"unknown trend '{trend}', pick disk|battery|ram|compliance|software"})
+        return json.dumps({"trend": trend, "rows": _repo.software_events(t)}, default=str)
+    return json.dumps({"error": f"unknown trend '{trend}', pick disk|battery|ram|"
+                                f"compliance|software|gaps|versions"})
 
 
 @tool
@@ -103,7 +110,8 @@ def query_device_history(
     device_id: str,
     limit: int = Field(default=30, description="Number of most recent snapshots"),
 ) -> str:
-    """Full time-series history for ONE device (must belong to the caller's company)."""
+    """Full time-series history for ONE device (must belong to the caller's
+    company). Each row carries RAM, battery, disk total/free and network_info."""
     t = _tenant(config)
     assert _repo is not None
     if not _repo.device_exists(t, device_id):

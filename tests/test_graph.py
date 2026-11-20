@@ -244,6 +244,107 @@ def test_repo_bootstraps_from_empty_path(tmp_path):
     assert r.latest_snapshot_row("acme-001", "MT7PJB7N5LRE") is not None
 
 
+# ── QA-failure fixes: richer trend/history data for grounded answers ────────
+
+def test_device_history_includes_disk_fields(repo):
+    """Regression: history rows without disk fields made the model claim the
+    data 'does not report' disk free/capacity (QA-017/060/061/070 class)."""
+    rows = repo.device_history("acme-001", "MT7PJB7N5LRE", limit=30)
+    assert len(rows) == 30
+    with_disk = [r for r in rows if r["disk_available_gib"] is not None]
+    assert with_disk, "no history row exposes disk fields"
+    r = with_disk[0]
+    assert r["disk_total_bytes"] and r["disk_available_bytes"] > 0
+    assert 0 < r["disk_available_gib"] <= r["disk_total_bytes"] / 2**30 + 1e-6
+
+
+def test_disk_trend_reports_first_last_with_dates(repo):
+    """Regression: aggregates only (min/burned) hid the first→last values the
+    trend answers need (QA-060: '91.0 to 97.6 GB')."""
+    rows = repo.disk_trend("acme-001")
+    r = next(x for x in rows if x["device_id"] == "MT7PJB7N5LRE")
+    assert r["avail_gib_start"] is not None and r["avail_gib_end"] is not None
+    assert str(r["first_seen"]) < str(r["last_seen"])
+    assert r["n"] == 30
+
+
+def test_battery_report_daily_cycle_rate(repo):
+    """QA-069: 'highest daily battery-cycle consumption' needs per-day rates."""
+    rows = repo.battery_report("acme-001")
+    r = next(x for x in rows if x["device_id"] == "MT7PJB7N5LRE")
+    assert r["cycles_start"] is not None and r["cycles_end"] is not None
+    assert r["cycles_per_day"] >= 0
+    assert r["cycles_end"] >= r["cycles_start"]
+
+
+def test_telemetry_gaps_lists_missing_network_and_battery(repo):
+    """QA-039: acme-001 has 9MXJVZ1I0DKA (5 snapshots missing network) and
+    MT7PJB7N5LRE (6). QA-063: E4V0SB5I0MYU battery missing on 2026-06-08/09."""
+    gaps = {g["device_id"]: g for g in repo.telemetry_gaps("acme-001")}
+    assert gaps["9MXJVZ1I0DKA"]["n_snapshots"] - len(
+        gaps["9MXJVZ1I0DKA"]["network_missing_at"] or []) == 25
+    assert len(gaps["9MXJVZ1I0DKA"]["network_missing_at"]) == 5
+    assert len(gaps["MT7PJB7N5LRE"]["network_missing_at"]) == 6
+    g2 = {g["device_id"]: g for g in repo.telemetry_gaps("globex-002")}
+    dates = [d[:10] for d in g2["E4V0SB5I0MYU"]["battery_missing_at"]]
+    assert "2026-06-08" in dates and "2026-06-09" in dates
+
+
+def test_version_changes_flags_no_updates(repo):
+    """QA-068: 'did any OS/agent version change in the window' — the flag must
+    be computed, not left to string-diffing by the model."""
+    rows = repo.version_changes("acme-001")
+    assert rows, "no version rows for acme-001"
+    assert all(r["agent_version_start"] == "42.0.0" for r in rows)
+    assert all(r["agent_changed"] is False for r in rows)
+
+
+def test_software_events_carry_version_and_last_seen(repo):
+    """QA-043: software answers need versions and 'still installed at the end'."""
+    rows = repo.software_events("initech-003", names=["uTorrent"])
+    assert rows
+    r = rows[0]
+    assert r["version"] is not None and r["last_seen"] is not None
+    assert str(r["first_seen"]) <= str(r["last_seen"])
+
+
+# ── deterministic action-ask nudge (QA-077/079/082 class) ───────────────────
+
+def test_action_nudge_fires_on_action_ask_without_proposals(repo, monkeypatch):
+    from src.graph.state import ExecutionPlan
+    state = {
+        "plan": ExecutionPlan(intent="action_request", steps=["x"]),
+        "tool_outputs": [{"tool": "query_fleet_snapshot", "args": {}, "result": "{}"}],
+        "iteration": 2, "reground_attempts": 0, "unsupported": [],
+    }
+    fb = nodes._action_feedback(state)
+    assert "CALL the matching action tool" in fb
+    # a refused call asks for an alternative instead
+    state["tool_outputs"].append({"tool": "create_upgrade_order", "args": {},
+                                  "result": '{"refused": true, "reason": "no grounds"}'})
+    fb2 = nodes._action_feedback(state)
+    assert "REFUSED" in fb2 and "notify_employee" in fb2
+    # with a real proposal, no nudge
+    state["tool_outputs"].append({"tool": "notify_employee", "args": {},
+                                  "result": '{"proposed": true, "action_id": "act_x"}'})
+    assert nodes._action_feedback(state) == ""
+
+
+def test_verifier_router_routes_reanalyze_for_action_nudge(repo):
+    from src.graph.state import ExecutionPlan
+    state = {
+        "plan": ExecutionPlan(intent="action_request", steps=[]),
+        "tool_outputs": [], "iteration": 1, "reground_attempts": 0,
+        "unsupported": [], "reground_feedback": "call the tools",
+        "action_nudges": 1,
+    }
+    assert nodes.verifier_router(state) == "re_analyze"
+    state["action_nudges"] = 0
+    assert nodes.verifier_router(state) == "re_analyze"
+    state["reground_feedback"] = ""
+    assert nodes.verifier_router(state) == "respond"
+
+
 # ── tenant isolation + config as single source of truth ─────────────────────
 
 def test_cross_tenant_read_and_action_refused(repo):

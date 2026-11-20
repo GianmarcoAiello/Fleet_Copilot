@@ -72,6 +72,16 @@ CREATE TABLE IF NOT EXISTS installed_software (
     name         VARCHAR,
     version      VARCHAR
 );
+CREATE TABLE IF NOT EXISTS network_interfaces (
+    snapshot_id  VARCHAR,
+    device_id    VARCHAR,
+    company_id   VARCHAR,
+    interface_name VARCHAR,
+    family       VARCHAR,
+    address      VARCHAR,
+    mac          VARCHAR,
+    internal     BOOLEAN
+);
 CREATE TABLE IF NOT EXISTS actions (
     action_id   VARCHAR PRIMARY KEY,
     company_id  VARCHAR,
@@ -107,7 +117,7 @@ def _flat(r: dict) -> tuple[list, list, list, list, list]:
         ident.get("serial_number"), ident.get("processor"),
         mem.get("total_memory_bytes"), mem.get("used_memory_bytes"),
     )]
-    disks, bats, comps, softs = [], [], [], []
+    disks, bats, comps, softs, nets = [], [], [], [], []
     for v in r.get("disk_volumes") or []:
         disks.append((sid, r["device_id"], r["company_id"], v.get("volume_name"),
                       v.get("file_system"), v.get("mount_point"), v.get("encrypted"),
@@ -121,7 +131,10 @@ def _flat(r: dict) -> tuple[list, list, list, list, list]:
                       c.get("status"), c.get("severity")))
     for s in r.get("installed_software") or []:
         softs.append((sid, r["device_id"], r["company_id"], s.get("name"), s.get("version")))
-    return snaps, disks, bats, comps, softs
+    for n in r.get("network") or []:
+        nets.append((sid, r["device_id"], r["company_id"], n.get("interface_name"),
+                     n.get("family"), n.get("address"), n.get("mac"), n.get("internal")))
+    return snaps, disks, bats, comps, softs, nets
 
 
 def _insert_many(con, table: str, rows: list[tuple], ncols: int) -> None:
@@ -141,16 +154,17 @@ def load_ndjson(db_path: str | os.PathLike, ndjson_path: str | os.PathLike) -> i
     Path(db_path).unlink(missing_ok=True)
     con = duckdb.connect(str(db_path))
     con.execute(SCHEMA)
-    snaps, disks, bats, comps, softs = [], [], [], [], []
+    snaps, disks, bats, comps, softs, nets = [], [], [], [], [], []
     with open(ndjson_path) as f:
         for line in f:
-            s, d, b, c, w = _flat(json.loads(line))
-            snaps += s; disks += d; bats += b; comps += c; softs += w
+            s, d, b, c, w, n = _flat(json.loads(line))
+            snaps += s; disks += d; bats += b; comps += c; softs += w; nets += n
     _insert_many(con, "snapshots", snaps, 15)
     _insert_many(con, "disk_volumes", disks, 9)
     _insert_many(con, "battery", bats, 8)
     _insert_many(con, "compliance_results", comps, 6)
     _insert_many(con, "installed_software", softs, 5)
+    _insert_many(con, "network_interfaces", nets, 8)
     n = con.execute("SELECT count(*) FROM snapshots").fetchone()[0]
     con.close()
     return n
@@ -212,7 +226,8 @@ class Repository:
                    b.cycle_count      AS battery_cycle_count,
                    b.full_charge_capacity AS battery_full_charge_capacity,
                    cf.fails           AS compliance_fails,
-                   cf.failed_checks   AS failed_checks
+                   cf.failed_checks   AS failed_checks,
+                   ni.network_info    AS network_info
             FROM snapshots s
             LEFT JOIN (SELECT snapshot_id, SUM(total_bytes)     AS total_bytes,
                               SUM(available_bytes)              AS available_bytes
@@ -222,6 +237,10 @@ class Repository:
                               string_agg(check_id, ',') AS failed_checks
                        FROM compliance_results
                        WHERE status = 'fail' GROUP BY snapshot_id) cf USING (snapshot_id)
+            LEFT JOIN (SELECT snapshot_id,
+                              string_agg(interface_name || ' (' || family || ' ' ||
+                                         address || ')', '; ') AS network_info
+                       FROM network_interfaces GROUP BY snapshot_id) ni USING (snapshot_id)
             WHERE s.company_id = ?
               AND s.collected_at = (SELECT max(collected_at) FROM snapshots w
                                     WHERE w.device_id = s.device_id)
@@ -239,11 +258,28 @@ class Repository:
         return rows[0] if rows else None
 
     def device_history(self, tenant_id: str, device_id: str, limit: int = 30) -> list[dict]:
+        # disk aggregates are joined per snapshot: without them the model sees a
+        # history with no disk fields and wrongly concludes the data "is missing"
         rows = self.con.execute(
             """
             SELECT s.*, b.percentage, b.condition AS battery_condition,
-                   b.cycle_count, b.full_charge_capacity
-            FROM snapshots s LEFT JOIN battery b USING (snapshot_id)
+                   b.cycle_count, b.full_charge_capacity,
+                   dv.disk_total_bytes, dv.disk_available_bytes,
+                   dv.disk_available_bytes / POW(1024, 3) AS disk_available_gib,
+                   CASE WHEN dv.disk_total_bytes > 0
+                        THEN dv.disk_available_bytes::DOUBLE / dv.disk_total_bytes END
+                                        AS disk_free_pct,
+                   (ni.snapshot_id IS NOT NULL) AS has_network_info,
+                   ni.network_info
+            FROM snapshots s
+            LEFT JOIN battery b USING (snapshot_id)
+            LEFT JOIN (SELECT snapshot_id, SUM(total_bytes) AS disk_total_bytes,
+                              SUM(available_bytes) AS disk_available_bytes
+                       FROM disk_volumes GROUP BY snapshot_id) dv USING (snapshot_id)
+            LEFT JOIN (SELECT snapshot_id,
+                              string_agg(interface_name || ' (' || family || ' ' ||
+                                         address || ')', '; ') AS network_info
+                       FROM network_interfaces GROUP BY snapshot_id) ni USING (snapshot_id)
             WHERE s.company_id = ? AND s.device_id = ?
             ORDER BY s.collected_at DESC LIMIT ?
             """,
@@ -288,6 +324,10 @@ class Repository:
             )
             SELECT device_id,
                    min(avail_gib) AS min_avail_gib,
+                   first(avail_gib ORDER BY collected_at) AS avail_gib_start,
+                   last(avail_gib ORDER BY collected_at)  AS avail_gib_end,
+                   min(collected_at) AS first_seen,
+                   max(collected_at) AS last_seen,
                    (first(avail_gib ORDER BY collected_at)
                     - last(avail_gib ORDER BY collected_at)) AS burned_gib,
                    count(*) AS n
@@ -303,9 +343,16 @@ class Repository:
             """
             SELECT b.device_id,
                    max(b.cycle_count) AS max_cycles,
+                   min(b.cycle_count) AS cycles_start,
+                   max(b.cycle_count) AS cycles_end,
                    max_by(b.condition, s.collected_at) AS latest_condition,
                    arg_min(b.full_charge_capacity, s.collected_at) AS capacity_start,
-                   arg_max(b.full_charge_capacity, s.collected_at) AS capacity_end
+                   arg_max(b.full_charge_capacity, s.collected_at) AS capacity_end,
+                   min(s.collected_at) AS first_seen,
+                   max(s.collected_at) AS last_seen,
+                   (max(b.cycle_count) - min(b.cycle_count))::DOUBLE
+                     / GREATEST(date_diff('day', min(s.collected_at), max(s.collected_at)), 1)
+                     AS cycles_per_day
             FROM battery b JOIN snapshots s USING (snapshot_id)
             WHERE b.company_id = ? AND b.battery_present
             GROUP BY b.device_id ORDER BY max_cycles DESC
@@ -329,25 +376,76 @@ class Repository:
         return [dict(zip(cols, r)) for r in rows]
 
     def software_events(self, tenant_id: str, names: list[str] | None = None) -> list[dict]:
-        """Software inventory per device with first-seen timestamp and assignee —
-        the join supplies employee_id so notify_employee can target users."""
-        base = ("SELECT i.name, i.device_id, s.employee_id, min(s.collected_at) AS first_seen "
+        """Software inventory per device with first-seen/last-seen timestamps,
+        version and assignee — last_seen shows whether the software was still
+        present at the final snapshot; the join supplies employee_id so
+        notify_employee can target users."""
+        base = ("SELECT i.name, i.version, i.device_id, s.employee_id, "
+                "min(s.collected_at) AS first_seen, max(s.collected_at) AS last_seen "
                 "FROM installed_software i JOIN snapshots s USING (snapshot_id) "
                 "WHERE i.company_id = ?")
+        group = " GROUP BY i.name, i.version, i.device_id, s.employee_id "
         if names:
             marks = ",".join("?" * len(names))
             rows = self.con.execute(
-                f"{base} AND i.name IN ({marks}) GROUP BY i.name, i.device_id, s.employee_id "
-                "ORDER BY first_seen DESC",
+                f"{base} AND i.name IN ({marks}){group}ORDER BY first_seen DESC",
                 (tenant_id, *names),
             ).fetchall()
         else:
             rows = self.con.execute(
-                f"{base} GROUP BY i.name, i.device_id, s.employee_id ORDER BY first_seen DESC",
+                f"{base}{group}ORDER BY first_seen DESC",
                 (tenant_id,),
             ).fetchall()
         cols = [d[0] for d in self.con.description]
         return [dict(zip(cols, r)) for r in rows]
+
+    def telemetry_gaps(self, tenant_id: str) -> list[dict]:
+        """Per-device snapshots with MISSING subsystem telemetry: network rows
+        absent, or battery fields all null (battery_present IS NULL — a desktop
+        with battery_present=False is 'no battery', not a gap). Feeds the
+        'gaps' trend: incomplete-telemetry and missing-data-pattern questions."""
+        rows = self.con.execute(
+            """
+            SELECT s.device_id,
+                   count(*) AS n_snapshots,
+                   list(strftime(s.collected_at, '%Y-%m-%d %H:%M'))
+                       FILTER (WHERE n.snapshot_id IS NULL) AS network_missing_at,
+                   list(strftime(s.collected_at, '%Y-%m-%d %H:%M'))
+                       FILTER (WHERE b.battery_present IS NULL) AS battery_missing_at
+            FROM snapshots s
+            LEFT JOIN (SELECT DISTINCT snapshot_id FROM network_interfaces) n USING (snapshot_id)
+            LEFT JOIN battery b USING (snapshot_id)
+            WHERE s.company_id = ?
+            GROUP BY s.device_id
+            HAVING len(network_missing_at) > 0 OR len(battery_missing_at) > 0
+            ORDER BY s.device_id
+            """,
+            (tenant_id,),
+        ).fetchall()
+        cols = [d[0] for d in self.con.description]
+        return [dict(zip(cols, r)) for r in rows]
+
+    def version_changes(self, tenant_id: str) -> list[dict]:
+        """OS/agent version at the window edges per device: answers 'did anything
+        update OS or agent in the last 30 days' without per-device history."""
+        rows = self.con.execute(
+            """
+            SELECT device_id,
+                   first(os_version ORDER BY collected_at)    AS os_version_start,
+                   last(os_version ORDER BY collected_at)     AS os_version_end,
+                   first(agent_version ORDER BY collected_at) AS agent_version_start,
+                   last(agent_version ORDER BY collected_at)  AS agent_version_end
+            FROM snapshots WHERE company_id = ?
+            GROUP BY device_id ORDER BY device_id
+            """,
+            (tenant_id,),
+        ).fetchall()
+        cols = [d[0] for d in self.con.description]
+        out = [dict(zip(cols, r)) for r in rows]
+        for r in out:  # flag in Python: the model must not diff version strings
+            r["os_changed"] = r["os_version_start"] != r["os_version_end"]
+            r["agent_changed"] = r["agent_version_start"] != r["agent_version_end"]
+        return out
 
     def device_exists(self, tenant_id: str, device_id: str) -> bool:
         return self.con.execute(

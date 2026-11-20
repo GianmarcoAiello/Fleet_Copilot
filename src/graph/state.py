@@ -55,6 +55,7 @@ class AgentState(TypedDict, total=False):
     unsupported: list[str]
     reground_feedback: str
     reground_attempts: int
+    action_nudges: int               # deterministic action-ask retries (bounded)
     # HITL
     pending_actions: list[ProposedAction]
     approved_action_ids: list[str]

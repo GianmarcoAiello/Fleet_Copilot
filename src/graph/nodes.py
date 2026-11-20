@@ -20,6 +20,10 @@ Classify the request and emit a short execution plan.
 Rules:
 - intent: 'qa' (current-state question), 'trend_insight' (patterns over the 30-day window),
   'action_request' (user asks to create orders/tickets/flags/notifications), or 'mixed'.
+- Requests that ASK FOR ACTIONS — even phrased as a question — are 'action_request'
+  or 'mixed', never plain 'qa': 'quali azioni proponi?', 'cosa proponi?', 'cosa deve
+  fare l'IT?', 'generate le azioni consigliate', 'proponi un intervento', 'what should
+  be done'. If the request mixes facts AND actions, use 'mixed'.
 - Steps must be concrete tool tasks ('query disk trends', 'filter devices with <20GB free').
 - You NEVER create action proposals: actions are proposed by the analyst through
   action tools AFTER reading telemetry, and require human approval.
@@ -28,7 +32,15 @@ Rules:
 ANALYST_SYSTEM = """You are the analyst of a Fleet Copilot. You answer ONLY from tool outputs.
 Rules:
 - Every fact in your answer must come from a tool call result in this conversation.
-- Cite device_id and collected_at for each fact you state.
+- Cite device_id and collected_at for each fact you state. Copy collected_at EXACTLY
+  as the tool returned it (ISO format 'YYYY-MM-DD HH:MM:SS') — never translate or
+  reformat dates in citations.
+- For 'what is the state of device X' questions report the WHOLE latest snapshot
+  row when available: model, processor, RAM total AND used, OS product/version/arch,
+  disk total/free, battery condition/cycles, employee_id (assignee), network_info.
+  Do not silently omit fields the tool returned; if a field is null say 'not
+  reported by telemetry' instead of 'the data does not include it' unless the
+  field is truly absent from the row.
 - Every insight you report MUST have three parts: the finding, the supporting
   evidence (device_id + collected_at + metric values), and a brief explanation of
   why the pattern matters (e.g. 'capacity down 15% in 30 days → battery near EOL').
@@ -41,11 +53,24 @@ Rules:
   needs the cited check currently failing, a replacement flag needs battery
   'Service Recommended', an upgrade needs real RAM/disk pressure.
 - ACTION REQUESTS MUST GO THROUGH THE TOOLS: when the user (or the plan intent)
-  asks for an action, gather the evidence with read tools, then CALL the
-  matching action tool in the same run. A prose recommendation without a tool
-  call does NOT fulfil the request — propose, never just describe.
+  asks for an action — 'proponi', 'quali azioni', 'cosa deve fare l'IT' — gather
+  the evidence with read tools, then CALL the matching action tool(s) in the same
+  run. A prose recommendation without a tool call does NOT fulfil the request —
+  propose, never just describe. If one action tool refuses (sufficiency rule),
+  propose the appropriate alternative instead of writing prose.
+- Choose the right action: battery 'Service Recommended' → create_upgrade_order
+  (component='battery'); screen_lock/os_up_to_date/disk_encryption failure →
+  open_remediation_ticket; unauthorized or unwanted software (uTorrent, remote
+  control tools) detected → notify_employee (the snapshot row carries employee_id);
+  disk space critically low AND the user can clean it up → notify_employee.
 - Device snapshots include employee_id: use it with notify_employee when the user
   asks to contact or warn a device's user (e.g. unauthorized software found).
+- Snapshots also expose network_info (interface + IP per device) — both
+  query_fleet_snapshot and query_device_history return it; do not claim IP or
+  interface data is missing without checking that field.
+- analyze_time_series_trends also offers 'gaps' (snapshots missing network or
+  battery telemetry, with dates) and 'versions' (OS/agent version changes over
+  the window) — use them for incomplete-telemetry and update questions.
 - If the user references a device outside your organization, the tools will refuse: report that.
 Tool economy (hard budget):
 - You have at most 6 turns and 4 tool calls per turn. Batch everything you need
@@ -218,6 +243,37 @@ def _draft_text(message) -> str:
 
 
 MAX_REGROUND = 1  # informed retry passes: the README promises "one more grounding pass"
+MAX_ACTION_NUDGES = 1  # one deterministic retry when an action ask produced no proposal
+
+
+def _action_feedback(state: AgentState) -> str:
+    """Deterministic guard for action asks: if the plan wanted actions but no
+    action tool returned a proposal, send ONE corrective pass. Without it the
+    model sometimes answers 'what should we do?' in prose and never proposes."""
+    tool_outputs = state.get("tool_outputs", [])
+    if _proposed_action_ids(tool_outputs):
+        return ""
+    attempted = any(out.get("tool") in ACTION_TOOL_NAMES for out in tool_outputs)
+    refused = any(out.get("tool") in ACTION_TOOL_NAMES
+                  and '"refused"' in str(out.get("result", ""))
+                  for out in tool_outputs)
+    refusals = "; ".join(
+        f"{out['tool']}: {str(out.get('result', ''))[:200]}"
+        for out in tool_outputs if out.get("tool") in ACTION_TOOL_NAMES)
+    if refused:
+        return ("Your action tool call(s) were REFUSED: " + refusals +
+                "\nRe-check the sufficiency rules and the latest-snapshot fields, then "
+                "propose the APPROPRIATE alternative action tool call now (e.g. "
+                "notify_employee when the employee can fix it, open_remediation_ticket "
+                "for a failing check) with valid telemetry evidence. If truly no "
+                "action has sufficient grounds, say why in your answer.")
+    if attempted:
+        return ""
+    return ("The user asked for actions but you proposed NONE through the action "
+            "tools — a prose recommendation does not fulfil the request. Gather "
+            "any missing evidence with read tools, then CALL the matching action "
+            "tool(s) now with telemetry evidence (device_id, collected_at, metric, "
+            "value). Propose, never just describe.")
 
 
 def _norm_ts(ts) -> str:
@@ -333,17 +389,30 @@ def verifier(state: AgentState) -> dict:
                     + "\n".join(f"- {u}" for u in unsupported)
                     + "\nEither fetch the missing evidence with a tool call, or remove "
                       "these claims from your answer.")
+    # deterministic action-ask guard (independent of claim verification)
+    nudges = state.get("action_nudges", 0)
+    action_fb = ""
+    plan = state.get("plan")
+    intent = getattr(plan, "intent", None) if plan else None
+    if (intent in ("action_request", "mixed")
+            and nudges < MAX_ACTION_NUDGES
+            and state.get("iteration", 0) < MAX_ITERATIONS):
+        action_fb = _action_feedback(state)
+    if action_fb:
+        feedback = (feedback + "\n\n" + action_fb).strip()
     return {"verified_claims": verified, "unsupported": unsupported,
             "reground_feedback": feedback,
             "reground_attempts": attempts + (1 if unsupported else 0),
+            "action_nudges": nudges + (1 if action_fb else 0),
             "response": None}  # clear stale response from a previous loop
 
 
 def verifier_router(state: AgentState) -> str:
     if _proposed_action_ids(state.get("tool_outputs", [])):
         return "hitl"
-    if (state.get("unsupported") and state.get("iteration", 0) < MAX_ITERATIONS
-            and state.get("reground_attempts", 0) <= MAX_REGROUND):
+    wants_re = state.get("unsupported") and state.get("reground_attempts", 0) <= MAX_REGROUND
+    wants_action = state.get("reground_feedback") and state.get("action_nudges", 0) <= MAX_ACTION_NUDGES
+    if ((wants_re or wants_action) and state.get("iteration", 0) < MAX_ITERATIONS):
         return "re_analyze"
     return "respond"
 
