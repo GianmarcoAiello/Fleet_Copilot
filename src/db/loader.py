@@ -256,19 +256,21 @@ class Repository:
         return [dict(zip(cols, r)) for r in rows]
 
     def software_events(self, tenant_id: str, names: list[str] | None = None) -> list[dict]:
+        """Software inventory per device with first-seen timestamp and assignee —
+        the join supplies employee_id so notify_employee can target users."""
+        base = ("SELECT i.name, i.device_id, s.employee_id, min(s.collected_at) AS first_seen "
+                "FROM installed_software i JOIN snapshots s USING (snapshot_id) "
+                "WHERE i.company_id = ?")
         if names:
             marks = ",".join("?" * len(names))
             rows = self.con.execute(
-                f"""SELECT name, min(collected_at) AS first_seen, count(DISTINCT device_id) AS devices
-                    FROM installed_software WHERE company_id = ? AND name IN ({marks})
-                    GROUP BY name""",
+                f"{base} AND i.name IN ({marks}) GROUP BY i.name, i.device_id, s.employee_id "
+                "ORDER BY first_seen DESC",
                 (tenant_id, *names),
             ).fetchall()
         else:
             rows = self.con.execute(
-                """SELECT name, min(collected_at) AS first_seen, count(DISTINCT device_id) AS devices
-                   FROM installed_software WHERE company_id = ? GROUP BY name
-                   ORDER BY first_seen DESC""",
+                f"{base} GROUP BY i.name, i.device_id, s.employee_id ORDER BY first_seen DESC",
                 (tenant_id,),
             ).fetchall()
         cols = [d[0] for d in self.con.description]

@@ -26,8 +26,14 @@ ANALYST_SYSTEM = """You are the analyst of a Fleet Copilot. You answer ONLY from
 Rules:
 - Every fact in your answer must come from a tool call result in this conversation.
 - Cite device_id and collected_at for each fact you state.
+- Every insight you report MUST have three parts: the finding, the supporting
+  evidence (device_id + collected_at + metric values), and a brief explanation of
+  why the pattern matters (e.g. 'capacity down 15% in 30 days → battery near EOL').
 - If tools return nothing relevant, say so — do not extrapolate.
-- For action tools, always attach telemetry evidence (device_id, collected_at, metric, value).
+- For action tools, ALWAYS attach telemetry evidence (device_id, collected_at,
+  metric, value) — an action without evidence will be refused.
+- Device snapshots include employee_id: use it with notify_employee when the user
+  asks to contact or warn a device's user (e.g. unauthorized software found).
 - If the user references a device outside your organization, the tools will refuse: report that.
 """
 
@@ -164,10 +170,26 @@ def verifier_router(state: AgentState) -> str:
 
 def hitl_gate(state: AgentState) -> dict:
     plan: ExecutionPlan = state["plan"]
+    pool = _evidence_pool(state.get("tool_outputs", []))
     proposals = []
     for act in plan.action_requests:
-        ok = all(e.device_id in _evidence_pool(state.get("tool_outputs", []))
-                 for e in act.evidence)
+        ok = all(e.device_id in pool for e in act.evidence)
+        # if the planner sent no structured evidence, harvest device/timestamp
+        # facts for this device from the captured tool outputs so the proposal
+        # is self-contained and auditable
+        evidence = [e.model_dump() for e in act.evidence]
+        if not evidence:
+            for out in state.get("tool_outputs", []):
+                text = str(out["result"])
+                if act.device_id in text:
+                    import re
+                    ts = re.search(rf"{act.device_id}\|(\d{{4}}-\d{{2}}-\d{{2}}T[^\"']*)", text)
+                    if ts:
+                        evidence = [{"device_id": act.device_id,
+                                     "collected_at": ts.group(1)[:19],
+                                     "metric": "snapshot",
+                                     "value": f"referenced in {out['tool']} output"}]
+                        break
         # link to the real DB action created by the tool call (if any), so the
         # UI can resolve it by id without a second lookup
         real = None
@@ -177,11 +199,9 @@ def hitl_gate(state: AgentState) -> dict:
                 "AND tool=? AND device_id=? ORDER BY created_at DESC LIMIT 1",
                 (state["tenant_id"], act.tool, act.device_id)).fetchone()
             real = row[0] if row else None
-        evidence = act.evidence or []
-        if not evidence and ok is False:
-            evidence = []
         proposals.append(act.model_copy(update={
             "action_id": real or f"unproposed_{len(proposals)}",
+            "evidence": evidence,
             "rationale": act.rationale or ("evidence-grounded" if ok else "INSUFFICIENT EVIDENCE")}))
     decision = interrupt({
         "proposed_actions": [p.model_dump() for p in proposals],

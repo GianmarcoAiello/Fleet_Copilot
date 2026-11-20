@@ -112,7 +112,7 @@ def run_mock(all_cases: list[dict]) -> None:
     # 2. cross-tenant action refuses + audited
     before = len(repo.audit_tail("acme-001", limit=1))
     r = tmap["flag_device_for_replacement"].invoke(
-        {"device_id": "DARFCP0BQM2G", "args": {}, "evidence": [{"device_id": "DARFCP0BQM2G"}]},
+        {"device_id": "DARFCP0BQM2G", "reason": "eval", "evidence": [{"device_id": "DARFCP0BQM2G"}]},
         config=cfg)
     refused = "refused" in r
     RESULTS.append({"id": "mock_cross_tenant_action_refused", "pass": refused,
@@ -120,15 +120,15 @@ def run_mock(all_cases: list[dict]) -> None:
 
     # 3. action without evidence refuses
     r = tmap["create_upgrade_order"].invoke(
-        {"device_id": "1LYSSFD074BB", "args": {}, "evidence": []}, config=cfg)
+        {"device_id": "1LYSSFD074BB", "component": "battery", "spec": "new", "evidence": []},
+        config=cfg)
     ok = "insufficient evidence" in r
     RESULTS.append({"id": "mock_action_no_evidence_refused", "pass": ok,
                     "failures": [] if ok else [r]})
 
     # 4. proper action proposes, HITL resolution via repo API
     r = tmap["create_upgrade_order"].invoke(
-        {"device_id": "1LYSSFD074BB",
-         "args": {"component": "battery"},
+        {"device_id": "1LYSSFD074BB", "component": "battery", "spec": "replacement",
          "evidence": [{"device_id": "1LYSSFD074BB", "collected_at": "2026-06-12T09:47:00Z",
                        "metric": "battery.condition", "value": "Normal"}]},
         config=cfg)

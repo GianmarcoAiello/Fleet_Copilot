@@ -121,20 +121,43 @@ def query_compliance(
 
 # ── action tools (propose-only; HITL gate handles approval) ────────────────
 
-class _ActionArgs(BaseModel):
+class _UpgradeArgs(BaseModel):
     device_id: str
-    args: dict = Field(default_factory=dict,
-                       description="Tool-specific args (component/spec/note/message…)")
+    component: str = Field(description="Component to upgrade: ram | disk | battery")
+    spec: str = Field(description="Target spec, e.g. '32 GB', '1 TB SSD'")
     evidence: list[dict] = Field(description="Evidence refs: device_id, collected_at, metric, value")
     rationale: str = ""
 
 
-def _make_action_tool(name: str, description: str):
-    @tool(name, description=description, args_schema=_ActionArgs)
+class _TicketArgs(BaseModel):
+    device_id: str
+    check_id: str = Field(description="Failed compliance check: disk_encryption | screen_lock | os_up_to_date")
+    note: str = Field(description="Remediation note for the IT admin")
+    evidence: list[dict] = Field(description="Evidence refs: device_id, collected_at, metric, value")
+    rationale: str = ""
+
+
+class _ReplaceArgs(BaseModel):
+    device_id: str
+    reason: str = Field(description="Why the device should be replaced (end-of-life hardware)")
+    evidence: list[dict] = Field(description="Evidence refs: device_id, collected_at, metric, value")
+    rationale: str = ""
+
+
+class _NotifyArgs(BaseModel):
+    device_id: str
+    message: str = Field(description="Message for the employee using the device")
+    evidence: list[dict] = Field(description="Evidence refs: device_id, collected_at, metric, value")
+    rationale: str = ""
+
+
+def _make_action_tool(name: str, description: str, schema: type[BaseModel]):
+    @tool(name, description=description, args_schema=schema)
     def _act(config: Annotated[RunnableConfig, InjectedToolArg],
-             device_id: str, args: dict, evidence: list[dict], rationale: str = "") -> str:
+             device_id: str, evidence: list[dict], rationale: str = "", **kwargs) -> str:
         t = _tenant(config)
         assert _repo is not None
+        args = {k: v for k, v in kwargs.items()}
         if not _repo.device_exists(t, device_id):
             _repo.audit(t, event="refusal", tool=name, args=args, evidence=evidence,
                         detail=f"unknown or cross-tenant device {device_id}")
@@ -153,16 +176,20 @@ def _make_action_tool(name: str, description: str):
 
 create_upgrade_order = _make_action_tool(
     "create_upgrade_order",
-    "Propose a hardware/component upgrade order for a device (e.g. RAM, disk, battery).")
+    "Propose a hardware/component upgrade order for a device (e.g. RAM, disk, battery).",
+    _UpgradeArgs)
 open_remediation_ticket = _make_action_tool(
     "open_remediation_ticket",
-    "Propose opening a remediation ticket for a failed compliance check on a device.")
+    "Propose opening a remediation ticket for a failed compliance check on a device.",
+    _TicketArgs)
 flag_device_for_replacement = _make_action_tool(
     "flag_device_for_replacement",
-    "Propose flagging a device for replacement (end-of-life hardware).")
+    "Propose flagging a device for replacement (end-of-life hardware).",
+    _ReplaceArgs)
 notify_employee = _make_action_tool(
     "notify_employee",
-    "Propose notifying the employee assigned to a device (e.g. about software policy).")
+    "Propose notifying the employee assigned to a device (e.g. about software policy violations).",
+    _NotifyArgs)
 
 
 READ_TOOLS = [query_fleet_snapshot, analyze_time_series_trends, query_device_history, query_compliance]
