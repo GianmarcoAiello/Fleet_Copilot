@@ -43,8 +43,8 @@ def _ver_tuple(v: str | None):
 @tool
 def query_fleet_snapshot(
     config: Annotated[RunnableConfig, InjectedToolArg],
-    min_avail_disk_gb: Optional[float] = Field(
-        default=None, description="Latest snapshot: devices with less free disk than this (GB)"),
+    min_avail_disk_gib: Optional[float] = Field(
+        default=None, description="Latest snapshot: devices with less free disk than this (GiB, 2^30 bytes)"),
     os_version_lt: Optional[str] = Field(
         default=None, description="macOS version filter, numeric compare (applies to macOS devices only)"),
     software: Optional[str] = Field(default=None, description="Devices with this software installed"),
@@ -63,9 +63,9 @@ def query_fleet_snapshot(
             "WHERE company_id = ? AND name = ?)")
         sql_params += [t, software]
     rows = _repo.latest_snapshots(t, " AND ".join(sql_filters), tuple(sql_params))
-    if min_avail_disk_gb is not None:
-        rows = [r for r in rows if r.get("disk_available_bytes") is not None
-                and r["disk_available_bytes"] / 1e9 < min_avail_disk_gb]
+    if min_avail_disk_gib is not None:
+        rows = [r for r in rows if r.get("disk_available_gib") is not None
+                and r["disk_available_gib"] < min_avail_disk_gib]
     if os_version_lt:
         rows = [r for r in rows if r.get("os_platform") == "darwin"
                 and _ver_tuple(r.get("os_version")) < _ver_tuple(os_version_lt)]
@@ -199,7 +199,6 @@ def _values_match(provided, db_value) -> bool:
 _METRIC_ALIASES = {  # analyst-facing name -> latest-snapshot row field
     "cycle_count": "battery_cycle_count",
     "battery_cycles": "battery_cycle_count",
-    "full_charge_capacity": "battery_cycle_count",
     "condition": "battery_condition",
     "free_disk_bytes": "disk_available_bytes",
     "disk_free_bytes": "disk_available_bytes",
@@ -226,9 +225,9 @@ def _sufficiency(name: str, row: dict, args: dict) -> tuple[bool, str]:
             if not total or used / total < 0.9:
                 return False, f"RAM pressure is below the 90% upgrade threshold on {row['device_id']}"
         elif comp == "disk":
-            avail = row.get("disk_available_bytes")
-            if avail is None or avail / 1e9 >= 20:
-                return False, f"free disk is at/above 20 GB on {row['device_id']} — no upgrade grounds"
+            avail = row.get("disk_available_gib")
+            if avail is None or avail >= 20:
+                return False, f"free disk is at/above 20 GiB on {row['device_id']} — no upgrade grounds"
         elif comp == "battery":
             if row.get("battery_condition") == "Normal":
                 return False, f"battery condition is Normal on {row['device_id']}"

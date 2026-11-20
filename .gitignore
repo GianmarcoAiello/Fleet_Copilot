@@ -2,7 +2,8 @@
 .DS_Store
 *.duckdb
 *.duckdb.wal
-data/          # rebuilt from device-telemetry-dataset.ndjson at the root
+# rebuilt from device-telemetry-dataset.ndjson at the root
+data/
 
 # local working docs & design context (not part of the deliverable)
 AGENTS.md
@@ -18,3 +19,5 @@ pre-analysis.rtf
 .venv/
 __pycache__/
 *.pyc
+*.egg-info/
+build/

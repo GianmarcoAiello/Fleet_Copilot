@@ -17,7 +17,8 @@ planner ──► analyst ◄──► execute_tools ──► verifier ──�
 
 - **Telemetry**: `device-telemetry-dataset.ndjson` — 750 snapshots, 25 devices,
   3 companies (`acme-001`, `globex-002`, `initech-003`), 30 days (2026-05-14 → 06-12).
-- **Storage**: DuckDB, rebuilt from the NDJSON (`data/fleet.duckdb`).
+- **Storage**: DuckDB at `data/fleet.duckdb`, auto-built from the NDJSON on
+  first open (the Repository bootstraps a missing DB — a fresh clone just works).
 - **Strictly local**: identifiers never leave the project except toward the LLM you configure.
 
 ---
@@ -121,8 +122,9 @@ proposals, 10 guardrail refusals) and scores three layers:
 2. **LLM judge** — agent answer vs the reference answer (factual_match 0..1;
    the hallucination flag counts only for direct contradictions, omissions
    lower factual_match only);
-3. **dataset validation** — expected facts are recomputed from the NDJSON, so
-   a wrong expectation is never charged to the agent (currently 0 mismatches).
+3. **dataset validation** — expected facts are recomputed from the NDJSON
+   (device counts, OS breakdowns; currently 0 mismatches). It does not yet
+   recompute disk/battery aggregates — the trend unit caveat below applies.
 
 **Full-run result (gpt-6-luna, temperature 0): 70/100.**
 
@@ -135,18 +137,18 @@ proposals, 10 guardrail refusals) and scores three layers:
 
 Honest caveats from the run:
 
-- **trend_insight is capped by the QA dataset, not only by the agent**: some
-  reference answers use slightly different aggregation windows than the raw
-  telemetry (e.g. burned disk 150.3 GB in the reference vs 161.3 GB computed
-  from the actual first→last snapshots). The tool reports the raw-data value;
-  the judge then flags a "contradiction". This accounts for a large share of
-  the trend failures.
+- **Units**: disk aggregates are **GiB (2^30 bytes)** across tools, snapshots
+  and the QA reference answers. An earlier run mixed GB-decimal (tool) with
+  GiB (references) and the judge mis-read the difference as contradictions;
+  the unit fix is why trend scores move between runs.
 - **action_proposal set equality**: the eval expects the exact action set from
   the dataset; the agent sometimes proposes a correct but smaller set (e.g. a
   ticket without the additional notification) and fails on set equality.
 - **judge = agent model**: factual_match carries some model bias; hallucination
   detection proper is deterministic (the verifier's grounding check), the judge
   flag is a secondary signal.
+- The HITL decision is one per gate invocation (all proposed actions share it);
+  the **Pending actions** tab allows approving/rejecting each action separately.
 - Raw results per case: `evals/qa100_results.json` (the runner is resume-safe).
 
 ---
@@ -165,20 +167,25 @@ evals/                deterministic suite + 100-QA live runner
 ```
 
 **Explicit loop, not a prompt wrapper.** The planner emits a typed
-`ExecutionPlan` (intent: `qa | trend_insight | action_request | mixed`, steps,
-action requests). The analyst runs a bounded ReAct loop (max 6 iterations) with
-tool calling. The verifier is a *separate* LLM pass that re-extracts verifiable
-claims from the draft and checks each against the evidence pool; unsupported
-claims are labelled, and if any remain the graph routes the analyst back for
-one more grounding pass (`re_analyze`) before responding. Action requests are
-never executed inline: they stop the graph at the HITL gate via
-`interrupt()` and resume only with a human `Command(resume=…)`.
+`ExecutionPlan` (intent: `qa | trend_insight | action_request | mixed`, steps —
+it never invents actions). The analyst runs a bounded ReAct loop (max 6 turns,
+4 tool calls per turn; at budget exhaustion a final answer is forced without
+tools bound). The verifier is a *separate* LLM pass that re-extracts verifiable
+claims and checks them against a deterministic **fact index** built from the
+tool-result payloads: every evidence ref must resolve to a real
+`(device_id, collected_at)` row with a matching value (1% numeric tolerance),
+unknown metrics and ungrounded numbers are rejected. Unsupported claims are
+labelled, and if any remain the graph routes the analyst back for **one
+informed re-ground pass** (`re_analyze`) — the retry message lists the rejected
+claims. Action proposals stop the graph at the HITL gate via `interrupt()`
+and resume only with a human `Command(resume=…)`; after approval an executor
+node flips the action `approved → executed` through a simulated connector.
 
 ### Tool catalog
 
 | tool | type | notes |
 |---|---|---|
-| `query_fleet_snapshot` | read | latest snapshot per device **with disk/battery/compliance aggregates joined**; filters combine with AND: min_avail_disk_gb (latest value), os_version_lt (numeric compare, macOS), software, check |
+| `query_fleet_snapshot` | read | latest snapshot per device **with disk/battery/compliance aggregates joined** (disk in bytes + GiB + free %); filters combine with AND: min_avail_disk_gib (latest value, GiB), os_version_lt (numeric compare, macOS), software, check |
 | `analyze_time_series_trends` | read | pre-built 30-day aggregates: disk, battery, ram, compliance pass→fail transitions (with first fail date), software |
 | `query_device_history` | read | full time-series for one device (tenant-checked) |
 | `query_compliance` | read | `scope=latest` dedups the **latest result per device+check across all statuses first, then filters**; `scope=all` keeps history; cap declared with `total_matching`/`truncated` |
@@ -200,15 +207,20 @@ parameter the model can set.
 ### Grounding strategy
 
 - Every fact must trace to a tool result; answers cite `device_id` +
-  `collected_at` (+ metric/value).
+  `collected_at` (+ metric/value). Disk aggregates are GiB everywhere.
 - **Evidence pool** = device ids *confirmed by tool results only* — never from
   tool-call args (a failed lookup proves the device was NOT found, but the id
   appears in the error text) and never from error/refusal replies. This closed
   a real hole where a cross-tenant device the tools never found could get an
   action approved.
-- The verifier scores every claim against that pool; unsupported ones are
-  surfaced in the answer under "NOT stated (insufficient evidence)" instead of
-  being silently dropped or invented.
+- **Fact index + value check** — the verifier does not just check device
+  membership: it builds a `(device_id, collected_at) → fields` index from the
+  tool-result payloads and validates every evidence ref against it (value
+  within 1%, timestamp exact, unknown metrics rejected, bare numbers must
+  match an actual payload value or a count).
+- Unsupported claims are surfaced in the answer under "NOT stated (insufficient"
+  "evidence)" instead of being silently dropped or invented, and trigger one
+  informed re-ground pass that names them.
 - Read tools never fabricate: empty results come back as empty, and the
   analyst prompt requires saying so.
 

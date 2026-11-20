@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from langchain_core.messages import AIMessage, HumanMessage  # noqa: E402
+from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
 
 import src.graph.nodes as nodes  # noqa: E402
 from src.db.loader import Repository, load_ndjson  # noqa: E402
@@ -140,9 +141,12 @@ def test_verifier_rejects_wrong_value_and_invented_timestamp(repo, monkeypatch):
             {"device_id": "MT7PJB7N5LRE", "collected_at": "1999-01-01T00:00:00Z",
              "metric": "disk_available_bytes", "value": "10995116278"}]},
         {"claim": "average disk usage 97%", "evidence": []},
+        {"claim": "device has 2 GB free", "evidence": [
+            {"device_id": "MT7PJB7N5LRE", "collected_at": "2026-06-12T08:39:00Z",
+             "metric": "free_gb", "value": "2"}]},
     ])
     out = nodes.verifier(st)
-    assert len(out["unsupported"]) == 3, out
+    assert len(out["unsupported"]) == 4, out
     assert out["reground_attempts"] == 1
     assert "NOT supported" in out["reground_feedback"]
 
@@ -179,12 +183,11 @@ def test_action_tool_refuses_invented_value_and_audits_once(repo):
 def test_resolve_action_idempotent_single_audit(repo):
     from src.tools.read_tools import flag_device_for_replacement
     cfg = {"configurable": {"tenant_id": "acme-001"}}
-    # MT7PJB7N5LRE battery condition — read the real value from the DB
-    row = repo.latest_snapshot_row("acme-001", "MT7PJB7N5LRE")
-    if (row.get("battery_condition") or "") != "Service Recommended":
-        pytest.skip("fixture device battery not Service Recommended")
+    # pick ANY acme device that meets the sufficiency rule dynamically
+    dev = next(d for d, r in [(x["device_id"], x) for x in repo.latest_snapshots("acme-001")]
+               if r.get("battery_condition") == "Service Recommended")
     r = json.loads(flag_device_for_replacement.invoke(
-        {"device_id": "MT7PJB7N5LRE", "reason": "x",
+        {"device_id": dev, "reason": "x",
          "evidence": [{"metric": "battery_condition", "value": "Service Recommended"}]},
         config=cfg))
     assert r["proposed"]
@@ -196,7 +199,49 @@ def test_resolve_action_idempotent_single_audit(repo):
     assert tail1.count("approved") - tail0.count("approved") == 1
     # executor flips approved -> executed with an `execution` audit event
     assert repo.execute_action("acme-001", aid)
-    assert tail1 and "execution" in [e["event"] for e in repo.audit_tail("acme-001", limit=100)]
+    assert "execution" in [e["event"] for e in repo.audit_tail("acme-001", limit=100)]
+
+
+def test_graph_executor_runs_on_approval(repo, monkeypatch):
+    """Full graph path: analyst calls the action tool -> interrupt -> resume
+    approve -> executor flips the action to `executed` + `execution` audit."""
+    from langgraph.types import Command
+    dev, row = next((x["device_id"], x) for x in repo.latest_snapshots("acme-001")
+                    if x.get("battery_condition") == "Service Recommended")
+    fake = FakeLLM(script=[
+        ([{"name": "flag_device_for_replacement",
+           "args": {"device_id": dev, "reason": "battery degraded",
+                    "evidence": [{"metric": "battery_condition",
+                                  "value": "Service Recommended"}]},
+           "id": "call_1"}], ""),
+        (None, f"Proposed replacement flag for {dev}."),
+    ])
+    fake.verifier_claims = [{"claim": f"{dev} flagged, awaiting approval", "evidence": []}]
+    fake.structured_payload = nodes.ExecutionPlan(intent="action_request", steps=["x"])
+    monkeypatch.setattr(nodes, "get_llm", lambda temperature=0.0: fake)
+
+    wf = nodes.build_workflow(repo, checkpointer=MemorySaver())
+    thread = {"configurable": {"thread_id": "t-exec", "tenant_id": "acme-001"}}
+    state = wf.invoke({"query": f"Flag {dev} for replacement", "tenant_id": "acme-001"},
+                      config=thread)
+    assert "__interrupt__" in state, "expected HITL interrupt"
+    state = wf.invoke(Command(resume={"approved": True, "approver": "tester"}), config=thread)
+    assert state.get("approved") is True
+    assert state.get("executed_action_ids"), "executor did not run"
+    events = [e["event"] for e in repo.audit_tail("acme-001", limit=20)]
+    assert events.count("execution") == 1
+    status = repo.con.execute("SELECT status FROM actions WHERE action_id=?",
+                              (state["executed_action_ids"][0],)).fetchone()[0]
+    assert status == "executed"
+
+
+def test_repo_bootstraps_from_empty_path(tmp_path):
+    """Clean-clone convenience: a missing/empty DB file is rebuilt from the NDJSON."""
+    p = tmp_path / "fresh.duckdb"
+    r = Repository(p)
+    n = r.con.execute("SELECT count(*) FROM snapshots").fetchone()[0]
+    assert n == 750
+    assert r.latest_snapshot_row("acme-001", "MT7PJB7N5LRE") is not None
 
 
 # ── tenant isolation + config as single source of truth ─────────────────────
@@ -212,9 +257,10 @@ def test_cross_tenant_read_and_action_refused(repo):
     assert json.loads(r2)["refused"]
 
 
-def test_state_and_config_tenant_disagree_config_wins(repo):
+def test_state_and_config_tenant_disagree_config_wins(repo, monkeypatch):
     # the gate reads the tenant from RunnableConfig, never from state
-    nodes.interrupt = lambda payload: (_ for _ in ()).throw(RuntimeError("no interrupt expected"))
+    monkeypatch.setattr(nodes, "interrupt",
+                        lambda payload: (_ for _ in ()).throw(RuntimeError("no interrupt expected")))
     state = {"tool_outputs": [], "tenant_id": "globex-002"}
     out = nodes.hitl_gate(state, {"configurable": {"tenant_id": "acme-001"}})
     assert out["approved"] is False and out["approval"] is None

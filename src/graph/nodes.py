@@ -278,17 +278,29 @@ def _claim_problems(c, idx: dict, pool: set[str]) -> list[str]:
             # collected_at from tool results, which normalize identically
             problems.append(f"no snapshot fact found for {e.device_id}@{e.collected_at}")
             continue
-        if e.metric and e.metric in bucket and e.value not in (None, ""):
-            if not _values_match(e.value, bucket[e.metric]):
+        if e.metric and e.value not in (None, ""):
+            if e.metric not in bucket:
+                # an unknown metric is a problem, not a skipped check
+                problems.append(f"metric '{e.metric}' does not exist in the cited "
+                                f"snapshot row of {e.device_id}")
+            elif not _values_match(e.value, bucket[e.metric]):
                 problems.append(f"{e.device_id}@{e.collected_at} {e.metric}: claimed "
                                 f"{e.value!r}, tool results say {bucket[e.metric]!r}")
-    # numbers asserted with no evidence refs: acceptable only if some tool
-    # aggregate (count/total) or fact value actually contains them
+    # numbers asserted with no evidence refs: must match an actual numeric value
+    # in the tool payloads (same value, or the same percentage as a fraction)
     if not c.evidence:
         nums = re.findall(r"\d+(?:\.\d+)?", c.claim)
         if nums:
-            haystack = " ".join(str(v) for bucket in idx.values() for v in bucket.values())
-            if not any(n in haystack for n in nums):
+            values: list[float] = []
+            for bucket in idx.values():
+                for v in bucket.values():
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        values.append(float(v))
+            ok = any(
+                any(abs(n - v) <= abs(v) * 0.01 or abs(n - v * 100) <= abs(v * 100) * 0.01
+                    for v in values)
+                for n in (float(x) for x in nums))
+            if not ok:
                 problems.append(f"numeric claim without any evidence ref: {c.claim[:120]}")
     return problems
 
@@ -387,14 +399,16 @@ def hitl_gate(state: AgentState, config=None) -> dict:
         # and from the web UI never double-audits
         for p in pending:
             repo.resolve_action(tenant, p["action_id"], approved, approver)
+        # after resolving, the approved ids are exactly the ones that were pending
+        approved_ids = [p["action_id"] for p in pending] if approved else []
     else:
         # the decision was already taken elsewhere (web UI Pending tab):
         # reflect it so the executor still runs on approval
-        approved = all(p["status"] == "approved" for p in proposals)
+        approved = all(p["status"] in ("approved", "executed") for p in proposals)
         decision = {"approved": approved, "approver": "pre-resolved"}
+        approved_ids = [p["action_id"] for p in proposals if approved]
     return {"approval": decision, "approved": approved,
-            "approved_action_ids": [p["action_id"] for p in proposals
-                                    if approved and p["status"] in ("approved", "executed")]}
+            "approved_action_ids": approved_ids}
 
 
 def hitl_router(state: AgentState) -> str:
@@ -445,11 +459,15 @@ def build_workflow(repo, checkpointer=None):
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
     set_repo(repo)
     g = StateGraph(AgentState)
-    if checkpointer is not None and getattr(checkpointer, "serde", None) is None:
+    if checkpointer is not None:
         # register our pydantic state types: kills the msgpack deprecation
-        # warning on checkpoint deserialization
+        # warning on checkpoint deserialization (MemorySaver's default serde
+        # has an empty allowlist)
         checkpointer.serde = JsonPlusSerializer(
-            allowed_msgpack_modules=[("src.graph.state",)])
+            allowed_msgpack_modules=[("src.graph.state", "ExecutionPlan"),
+                                     ("src.graph.state", "DraftClaim"),
+                                     ("src.graph.state", "EvidenceRef"),
+                                     ("src.graph.state", "ProposedAction")])
     g.add_node("planner", planner)
     g.add_node("analyst", analyst)
     g.add_node("execute_tools", analyst_tools)

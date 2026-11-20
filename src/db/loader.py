@@ -165,8 +165,25 @@ class Repository:
     model-controlled argument.
     """
 
-    def __init__(self, db_path: str | os.PathLike):
-        self.con = duckdb.connect(str(db_path), read_only=False)
+    def __init__(self, db_path: str | os.PathLike, bootstrap: bool = True):
+        self.db_path = str(db_path)
+        self.con = duckdb.connect(self.db_path, read_only=False)
+        if bootstrap and self._needs_bootstrap():
+            # clean-clone convenience: rebuild from the NDJSON so every entry
+            # point works without a manual load step
+            self.con.close()
+            load_ndjson(self.db_path, Path(__file__).resolve().parent.parent.parent
+                        / "device-telemetry-dataset.ndjson")
+            self.con = duckdb.connect(self.db_path, read_only=False)
+
+    def _needs_bootstrap(self) -> bool:
+        try:
+            row = self.con.execute(
+                "SELECT count(*) FROM information_schema.tables "
+                "WHERE table_name = 'snapshots'").fetchone()
+            return not row or not row[0]
+        except duckdb.Error:
+            return True
 
     @classmethod
     def _open_readonly(cls, db_path: str | os.PathLike) -> "Repository":
@@ -185,12 +202,15 @@ class Repository:
             SELECT s.*,
                    dv.total_bytes     AS disk_total_bytes,
                    dv.available_bytes AS disk_available_bytes,
+                   dv.total_bytes / POW(1024, 3)     AS disk_total_gib,
+                   dv.available_bytes / POW(1024, 3) AS disk_available_gib,
                    CASE WHEN dv.total_bytes > 0
                         THEN dv.available_bytes::DOUBLE / dv.total_bytes END
                                       AS disk_free_pct,
                    b.percentage       AS battery_percentage,
                    b.condition        AS battery_condition,
                    b.cycle_count      AS battery_cycle_count,
+                   b.full_charge_capacity AS battery_full_charge_capacity,
                    cf.fails           AS compliance_fails,
                    cf.failed_checks   AS failed_checks
             FROM snapshots s
@@ -254,22 +274,24 @@ class Repository:
 
     def disk_trend(self, tenant_id: str) -> list[dict]:
         # per-snapshot SUM first: a device with multiple volumes must report the
-        # whole-disk first→last delta, not a first/last across mixed volume rows
+        # whole-disk first→last delta, not a first/last across mixed volume rows.
+        # Units: GiB (2^30 bytes) — consistent with the snapshot fields and the
+        # QA reference answers.
         rows = self.con.execute(
             """
             WITH per_snap AS (
                 SELECT d.device_id, s.collected_at,
-                       SUM(d.available_bytes)/1e9 AS avail_gb
+                       SUM(d.available_bytes)/POW(1024,3) AS avail_gib
                 FROM disk_volumes d JOIN snapshots s USING (snapshot_id)
                 WHERE d.company_id = ?
                 GROUP BY d.snapshot_id, d.device_id, s.collected_at
             )
             SELECT device_id,
-                   min(avail_gb) AS min_avail_gb,
-                   (first(avail_gb ORDER BY collected_at)
-                    - last(avail_gb ORDER BY collected_at)) AS burned_gb,
+                   min(avail_gib) AS min_avail_gib,
+                   (first(avail_gib ORDER BY collected_at)
+                    - last(avail_gib ORDER BY collected_at)) AS burned_gib,
                    count(*) AS n
-            FROM per_snap GROUP BY device_id ORDER BY min_avail_gb ASC
+            FROM per_snap GROUP BY device_id ORDER BY min_avail_gib ASC
             """,
             (tenant_id,),
         ).fetchall()
