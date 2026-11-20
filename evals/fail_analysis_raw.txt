@@ -1,0 +1,382 @@
+### QA-009 [grounded_qa] tenant=acme-001
+FAILURES: ['judge factual_match 0.50 < 0.6']
+interrupted=False proposed_tools=[] factual=0.5 verdict=mismatch
+Q: Ci sono dispositivi in acme-001 che falliscono il controllo ad alta severità disk_encryption?
+JUDGE_NOTES: L’agente risponde correttamente che non ci sono risultati falliti ad alta severità, ma omette il fatto specifico del riferimento: tutti e 10 i dispositivi superano il controllo per tutti i 30 giorni. 
+RESP_TAIL: - Non risultano dispositivi corrispondenti: la query per controlli **disk_encryption** falliti ad alta severità ha restituito **0 risultati**. Nessun `device_id` o `collected_at` è disponibile da citare.
+  evidence: (derived from tool outputs)
+
+(plan intent: qa; tool calls: 1)
+
+### QA-012 [grounded_qa] tenant=initech-003
+FAILURES: ['judge flagged hallucination: L’agente riporta correttamente identificativo, alias, timestamp, modello, processore, RAM installata, Windows 11 23H2 e ']
+interrupted=False proposed_tools=[] factual=0.71 verdict=partial
+Q: Qual è lo stato hardware e OS aggiornato al 12 giugno 2026 per il dispositivo 2MAN6T4DJD95 (initech-dell-5)?
+JUDGE_NOTES: L’agente riporta correttamente identificativo, alias, timestamp, modello, processore, RAM installata, Windows 11 23H2 e condizione/cicli della batteria. Omette assegnatario, build 22631, spazio libero
+RESP_TAIL: cle_count = 138`, `full_charge_capacity = 4638`, alle `2026-06-12 09:54:00`. **Perché conta:** il campo di condizione riporta un esito normale; il risultato non specifica soglie o unità per interpretare ulteriormente gli altri valori.
+- **Sistema operativo:** Windows 11 versione **23H2**, architettura **x64**. **Evidenza:** `os_product = Windows`, `os_version = 11 23H2`, `os_arch = x64`, alle `202
+
+### QA-013 [grounded_qa] tenant=globex-002
+FAILURES: ['judge flagged hallucination: Copre correttamente dispositivo, data/ora, modello MacBook Air con M2, 8 GB RAM, macOS 13.6 e batteria Normal con 519 ci']
+interrupted=False proposed_tools=[] factual=0.72 verdict=partial
+Q: Qual è lo stato hardware e OS aggiornato al 12 giugno 2026 per il dispositivo 4SEFDLPTKXAM (globex-macbook-3)?
+JUDGE_NOTES: Copre correttamente dispositivo, data/ora, modello MacBook Air con M2, 8 GB RAM, macOS 13.6 e batteria Normal con 519 cicli. Omette l’assegnatario, il build 22G120, spazio libero/totale disco e utiliz
+RESP_TAIL: Batteria:** condizione `Normal`, 519 cicli, capacità a piena carica pari a 4063. **Evidenza:** `4SEFDLPTKXAM`, `2026-06-12 08:34:00` — `battery_condition`, `cycle_count`, `full_charge_capacity`. **Perché conta:** il dato disponibile indica una condizione normale; non è fornita un’unità per la capacità.
+
+Nel risultato consultato non sono riportati dati su disco o altri componenti hardware.
+  eviden
+
+### QA-015 [grounded_qa] tenant=acme-001
+FAILURES: ['judge flagged hallucination: The answer correctly gives the device/model, CPU, 16 GB RAM, Windows 10 22H2, battery condition and 1157 cycles at the r']
+interrupted=False proposed_tools=[] factual=0.78 verdict=partial
+Q: Qual è lo stato hardware e OS aggiornato al 12 giugno 2026 per il dispositivo 8NM23J95R5I6 (acme-thinkpad-8)?
+JUDGE_NOTES: The answer correctly gives the device/model, CPU, 16 GB RAM, Windows 10 22H2, battery condition and 1157 cycles at the reference timestamp. It omits the reference's build 19045, 26.5 GB free of 1024 G
+RESP_TAIL: , `cycle_count=1157` e `full_charge_capacity=3872`. **Evidenza:** dispositivo **8NM23J95R5I6**, rilevato **2026-06-12 09:02:00**. **Perché conta:** la telemetria segnala che la batteria richiede attenzione.
+- **Sistema operativo:** Windows 10 versione **22H2**, architettura **x64**. **Evidenza:** `os_product=Windows`, `os_version=10 22H2`, `os_arch=x64` — dispositivo **8NM23J95R5I6**, rilevato **2
+
+### QA-017 [grounded_qa] tenant=globex-002
+FAILURES: ['judge flagged hallucination: Contradiction: “Il risultato più recente non riporta un valore di spazio libero o capacità del disco.” The reference sta']
+interrupted=False proposed_tools=[] factual=0.8 verdict=partial
+Q: Qual è lo stato hardware e OS aggiornato al 12 giugno 2026 per il dispositivo CUXW0BQSV1B7 (globex-thinkpad-6)?
+JUDGE_NOTES: Contradiction: “Il risultato più recente non riporta un valore di spazio libero o capacità del disco.” The reference states that 244.1 GB are free out of 1024 GB at the stated timestamp. The answer ot
+RESP_TAIL:  **Memoria e batteria:** risultano 15.058.814.935 byte di RAM usata; la batteria è indicata come `Normal`, con 362 cicli e capacità di carica completa riportata pari a 4925. **Evidenza:** `CUXW0BQSV1B7`, `2026-06-12 10:47:00`: `ram_used_bytes=15058814935`, `battery_condition=Normal`, `cycle_count=362`, `full_charge_capacity=4925`. **Perché conta:** sono indicatori utili per tenere d’occhio l’utili
+
+### QA-018 [grounded_qa] tenant=initech-003
+FAILURES: ['judge flagged hallucination: L’agent riporta correttamente identificativo/nome, MacBook Pro con M3 Pro, 32 GB di RAM (come byte totali), macOS 14.5, ']
+interrupted=False proposed_tools=[] factual=0.7 verdict=partial
+Q: Qual è lo stato hardware e OS aggiornato al 12 giugno 2026 per il dispositivo DARFCP0BQM2G (initech-macbook-6)?
+JUDGE_NOTES: L’agent riporta correttamente identificativo/nome, MacBook Pro con M3 Pro, 32 GB di RAM (come byte totali), macOS 14.5, data e ora, condizione batteria Normal e 530 cicli. Omette l’assegnatario, la bu
+RESP_TAIL: za:** DARFCP0BQM2G, `2026-06-12 10:31:00` — `battery_condition: Normal`, `cycle_count: 530`, `full_charge_capacity: 5781`. **Perché conta:** sono gli indicatori disponibili sullo stato della batteria.
+- **Sistema operativo:** macOS 14.5, versione riportata sul dispositivo. **Evidenza:** DARFCP0BQM2G, `2026-06-12 10:31:00` — `os_product: macOS`, `os_version: 14.5`. **Perché conta:** la versione è v
+
+### QA-019 [grounded_qa] tenant=acme-001
+FAILURES: ['no evidence citations (device id + timestamp) in response']
+interrupted=False proposed_tools=[] factual=0.72 verdict=partial
+Q: Qual è lo stato hardware e OS aggiornato al 12 giugno 2026 per il dispositivo DLT35MHGTH2D (acme-mac-5)?
+JUDGE_NOTES: L’agent riporta correttamente identificativo, timestamp, modello, processore, RAM installata, versione macOS e capacità/spazio libero del disco. Omette l’assegnatario, la build 24E248, l’utilizzo RAM 
+RESP_TAIL: zione di disco quasi esaurito.
+
+- **Stato batteria e conformità:** i campi batteria sono nulli; risulta **un controllo fallito: `screen_lock`**.  
+  **Evidenza:** DLT35MHGTH2D — raccolto il **12 giugno 2026 alle 09:36**; `battery_condition: null`, `battery_percentage: null`, `compliance_fails: 1`, `failed_checks: screen_lock`.  
+  **Perché conta:** la rilevazione non fornisce dati sulla batteria e
+
+### QA-027 [grounded_qa] tenant=acme-001
+FAILURES: ['judge flagged hallucination: L’agent riporta correttamente dispositivo/modello, chip M2 Pro, 16 GB di RAM, macOS 14.5, l’ora della rilevazione e circ']
+interrupted=False proposed_tools=[] factual=0.65 verdict=partial
+Q: Qual è lo stato hardware e OS aggiornato al 12 giugno 2026 per il dispositivo MT7PJB7N5LRE (acme-macbook-4)?
+JUDGE_NOTES: L’agent riporta correttamente dispositivo/modello, chip M2 Pro, 16 GB di RAM, macOS 14.5, l’ora della rilevazione e circa 10,2 GB liberi su 512 GB. Omette l’assegnazione a emp-acme-1003, la build 23F7
+RESP_TAIL: lto ridotto e può limitare installazioni e aggiornamenti.  
+- **Batteria:** i dati sullo stato e sulla carica della batteria non sono disponibili nella rilevazione. **Evidenza:** `device_id=MT7PJB7N5LRE`, `collected_at=2026-06-12 08:39:00`; `battery_percentage=null`, `battery_condition=null`, `battery_cycle_count=null`, `battery_full_charge_capacity=null`. **Perché conta:** non è possibile valutar
+
+### QA-028 [grounded_qa] tenant=globex-002
+FAILURES: ["judge flagged hallucination: L'agent riporta correttamente dispositivo, timestamp, modello MacBook Air, Apple M2, 8 GB RAM, macOS 15.3 e batteria Nor"]
+interrupted=False proposed_tools=[] factual=0.75 verdict=partial
+Q: Qual è lo stato hardware e OS aggiornato al 12 giugno 2026 per il dispositivo Q1AFVLH3YV33 (globex-macbook-4)?
+JUDGE_NOTES: L'agent riporta correttamente dispositivo, timestamp, modello MacBook Air, Apple M2, 8 GB RAM, macOS 15.3 e batteria Normal con 332 cicli. Omette build 24D60 e dato essenziale di archiviazione (125.7 
+RESP_TAIL: `, `ram_used_bytes=5137025218`.)*
+- **Batteria:** condizione **Normal**, **332 cicli**, capacità di carica completa registrata pari a **4205**. La condizione riportata è normale; il risultato non specifica l’unità della capacità. *(Q1AFVLH3YV33, 2026-06-12 08:34:00: `battery_condition=Normal`, `cycle_count=332`, `full_charge_capacity=4205`.)*
+- **Archiviazione:** il rilevamento restituito non incl
+
+### QA-030 [grounded_qa] tenant=globex-002
+FAILURES: ['judge flagged hallucination: L’agent riporta correttamente dispositivo, modello, Apple M2 Pro, 16 GiB, macOS 14.5, timestamp e batteria Normal con 61']
+interrupted=False proposed_tools=[] factual=0.65 verdict=partial
+Q: Qual è lo stato hardware e OS aggiornato al 12 giugno 2026 per il dispositivo QPZSXKINA7GP (globex-macbook-5)?
+JUDGE_NOTES: L’agent riporta correttamente dispositivo, modello, Apple M2 Pro, 16 GiB, macOS 14.5, timestamp e batteria Normal con 61 cicli. Omette l’assegnatario, la build 23F79, lo spazio libero/capacità disco e
+RESP_TAIL: PZSXKINA7GP`, raccolto il `2026-06-12 10:04:00`: `battery_condition=Normal`, `cycle_count=61`, `full_charge_capacity=5767`. **Perché conta:** il dato indica una condizione normale nel rilevamento, ma da solo non quantifica l’autonomia residua.
+- **Sistema operativo:** macOS 14.5. **Evidenza:** `QPZSXKINA7GP`, raccolto il `2026-06-12 10:04:00`: `os_product=macOS`, `os_version=14.5`. **Perché conta:
+
+### QA-039 [grounded_qa] tenant=acme-001
+FAILURES: ['judge factual_match 0.00 < 0.6']
+interrupted=False proposed_tools=[] factual=0.0 verdict=mismatch
+Q: Quali dispositivi in acme-001 presentano telemetria di rete incompleta su alcuni snapshot?
+JUDGE_NOTES: The agent does not identify either device or report the missing-snapshot counts. Its stated limitation is not a device-specific contradiction of the reference.
+RESP_TAIL: :00), `MT7PJB7N5LRE` (08:39), `Q3VUITEGQ400` (09:26) e `XSU9UUDGU6AC` (09:52), tutti del 2026-06-12; nei relativi risultati non compaiono metriche di rete.
+
+**Perché conta:** senza campi di rete e senza dati storici pertinenti, segnalare dispositivi come incompleti sarebbe una conclusione non supportata dai dati disponibili.
+  evidence: (derived from tool outputs)
+
+(plan intent: qa; tool calls: 1)
+
+### QA-040 [grounded_qa] tenant=initech-003
+FAILURES: ['judge factual_match 0.00 < 0.6']
+interrupted=False proposed_tools=[] factual=0.0 verdict=mismatch
+Q: Che indirizzo IP e interfaccia utilizza il dispositivo 2MAN6T4DJD95 al 12 giugno 2026?
+JUDGE_NOTES: The agent does not provide the reference IP address 192.168.2.176 or Ethernet interface (MAC cf:ab:3a:b8:c4:67). Its claim that the data does not report these fields is not a device-specific contradic
+RESP_TAIL: irizzo IP e l’interfaccia di rete non sono riportati nei dati disponibili per **2MAN6T4DJD95** al **12 giugno 2026**. La telemetria più recente è del **2026-06-12 09:54:00** e include, tra gli altri, `os_platform: win32` e `os_version: 11 23H2`, ma non campi IP o interfaccia. **Perciò non posso determinarli da questi dati.**
+  evidence: (derived from tool outputs)
+
+(plan intent: qa; tool calls: 1)
+
+### QA-041 [grounded_qa] tenant=globex-002
+FAILURES: ['judge flagged hallucination: La risposta include correttamente DXUCJ272DCYX e IZ6K51CBZR8F come dispositivi con tutti e tre i controlli pass, ma aggi']
+interrupted=False proposed_tools=[] factual=0.67 verdict=partial
+Q: Quali dispositivi in globex-002 hanno tutti i controlli di compliance in stato pass?
+JUDGE_NOTES: La risposta include correttamente DXUCJ272DCYX e IZ6K51CBZR8F come dispositivi con tutti e tre i controlli pass, ma aggiunge E4V0SB5I0MYU, in contraddizione con la reference che indica esattamente due
+RESP_TAIL:  i controlli riportati risultano superati.
+- **IZ6K51CBZR8F** — evidenza del **2026-06-12 09:30**: `os_up_to_date=pass`, `screen_lock=pass`, `disk_encryption=pass`. **Perché conta:** tutti e tre i controlli riportati risultano superati.
+
+Questi sono i dispositivi corrispondenti nei risultati della compliance, ma l’appartenenza a **globex-002** resta da verificare.
+
+(plan intent: qa; tool calls: 3)
+
+### QA-043 [grounded_qa] tenant=initech-003
+FAILURES: ['judge factual_match 0.55 < 0.6']
+interrupted=False proposed_tools=[] factual=0.55 verdict=mismatch
+Q: Quali software risultano installati sul dispositivo W2656QDAE2ZJ alla fine del periodo?
+JUDGE_NOTES: The answer names all six software products from the reference, but omits every version number. It also hedges that the trends do not establish they were installed at the final snapshot; this is not a 
+RESP_TAIL: tano uTorrent con prima rilevazione il **2026-06-02 10:45:00** e gli altri cinque programmi con prima rilevazione il **2026-05-14 10:42:00**. **Perché conta:** l’elenco indica i software rilevati nel periodo, ma le date di prima rilevazione non confermano da sole che fossero ancora installati alla data dello snapshot finale.
+  evidence: (derived from tool outputs)
+
+(plan intent: qa; tool calls: 5)
+
+### QA-044 [grounded_qa] tenant=globex-002
+FAILURES: ['judge factual_match 0.50 < 0.6']
+interrupted=False proposed_tools=[] factual=0.5 verdict=mismatch
+Q: Qual è il dispositivo con il minor numero di cicli batteria in globex-002?
+JUDGE_NOTES: L’agente identifica correttamente QPZSXKINA7GP e riporta il dato di 61 cicli del 12 giugno. Omette il nome globex-macbook-5, il confronto con i 27 cicli del 14 maggio e la capacità massima stabile di 
+RESP_TAIL: - Il dispositivo con meno cicli batteria è **QPZSXKINA7GP**, con **61 cicli**.  
+**Evidenza:** QPZSXKINA7GP — raccolta **2026-06-12 10:04:00** — `battery_cycle_count: 61`.  
+**Perché conta:** è il valore minimo tra gli 8 dispositivi restituiti per globex-002.
+  evidence: (derived from tool outputs)
+
+(plan intent: qa; tool calls: 1)
+
+### QA-046 [trend_insight] tenant=acme-001
+FAILURES: ['judge flagged hallucination: The answer correctly identifies the three devices and the capacity changes (4043→3872, 3406→3262, 4348→4166), and the se']
+interrupted=False proposed_tools=[] factual=0.72 verdict=partial
+Q: Individua i trend di degrado batteria in acme-001 negli ultimi 30 giorni.
+JUDGE_NOTES: The answer correctly identifies the three devices and the capacity changes (4043→3872, 3406→3262, 4348→4166), and the service-recommended status. It omits the reference's transition from 'Normal' and 
+RESP_TAIL: condizione riportata indicano un degrado rilevante nel periodo.  
+- **M4XVHUV1MEPZ** — **Riscontro:** capacità da 3406 a 3262 (−144, circa **4,2%**). **Evidenza:** `full_charge_capacity=3406` il 2026-05-14 08:40 e `full_charge_capacity=3262`, `battery_condition=Service Recommended` il 2026-06-12 11:00. **Perché conta:** la riduzione è accompagnata dalla raccomandazione di assistenza.
+
+**Sintesi:**
+
+### QA-053 [trend_insight] tenant=acme-001
+FAILURES: ['device coverage 1/5 < 60%', 'judge factual_match 0.00 < 0.6']
+interrupted=False proposed_tools=[] factual=0.0 verdict=mismatch
+Q: Che deriva di compliance (compliance drift) si è verificata in acme-001?
+JUDGE_NOTES: L’agente non riporta il finding di regressione screen_lock per i cinque dispositivi e date indicati. Non c’è una contraddizione fattuale diretta rispetto alla reference; l’asserzione di insufficienza/
+RESP_TAIL: idence): Non posso determinare la deriva di compliance di **acme-001**: la richiesta della sua cronologia ha restituito `device 'acme-001' not found in your organization` (device_id **acme-001**; `collected_at` non fornito dal tool). La cronologia compliance disponibile riguarda invece **1LYSSFD074BB**, non identificato come acme-001 (2026-06-12 09:47).
+
+(plan intent: trend_insight; tool calls: 2)
+
+### QA-057 [trend_insight] tenant=globex-002
+FAILURES: ['device coverage 0/1 < 60%', 'judge factual_match 0.00 < 0.6']
+interrupted=False proposed_tools=[] factual=0.0 verdict=mismatch
+Q: Che variazioni nell'inventario software sono avvenute in globex-002?
+JUDGE_NOTES: The reference says an unapproved BitTorrent client, uTorrent, was detected on device Q1AFVLH3YV33 (emp-globex-1003) starting May 20, 2026. The agent answer does not report this software change. Its co
+RESP_TAIL: V1B7` nello snapshot del **2026-06-12 10:47:00**.
+
+La ricerca dello storico software usando `globex-002` come `device_id` è stata rifiutata; quindi non ho dati per stabilire quali software siano stati aggiunti, rimossi o modificati. Questi snapshot attestano l’associazione aziendale, ma non le variazioni software.
+  evidence: (derived from tool outputs)
+
+(plan intent: trend_insight; tool calls: 3)
+
+### QA-060 [trend_insight] tenant=globex-002
+FAILURES: ['judge factual_match 0.00 < 0.6']
+interrupted=False proposed_tools=[] factual=0.0 verdict=mismatch
+Q: Qual è il trend di utilizzo disco di 4SEFDLPTKXAM e IZ6K51CBZR8F in globex-002?
+JUDGE_NOTES: The answer omits the reference's trend and values: both devices gained free disk space over 30 days (4SEFDLPTKXAM: 91.0 to 97.6 GB, +6.6 GB; IZ6K51CBZR8F: 61.6 to 69.0 GB, +7.4 GB), with no criticalit
+RESP_TAIL: ica di utilizzo disco per nessuno dei due dispositivi. Per **4SEFDLPTKXAM**, la cronologia arriva al **2026-06-12 08:34:00**; per **IZ6K51CBZR8F**, al **2026-06-12 09:30:00**. **Perché conta:** senza valori di spazio usato o disponibile in date successive non è possibile stabilire direzione o variazioni del trend.
+  evidence: (derived from tool outputs)
+
+(plan intent: trend_insight; tool calls: 2)
+
+### QA-061 [trend_insight] tenant=initech-003
+FAILURES: ['judge factual_match 0.00 < 0.6', 'judge flagged hallucination: L’agente sostiene: «la cronologia restituita per il dispositivo ... non riporta metriche di spazio disco né timestamp di']
+interrupted=False proposed_tools=[] factual=0.0 verdict=mismatch
+Q: Esiste una correlazione temporale tra l'installazione di TeamViewer e il consumo disco su DARFCP0BQM2G?
+JUDGE_NOTES: L’agente sostiene: «la cronologia restituita per il dispositivo ... non riporta metriche di spazio disco né timestamp di installazione o eventi software» e conclude che non si possa verificare la corr
+RESP_TAIL: 026-05-14 09:53:00; DARFCP0BQM2G, `collected_at` 2026-06-12 10:31:00).
+- **Perché conta:** senza misure del disco e la data di installazione non si possono allineare i due andamenti nel tempo; quindi non si può concludere né che vi sia un’associazione temporale né che TeamViewer abbia causato un eventuale consumo.
+  evidence: (derived from tool outputs)
+
+(plan intent: trend_insight; tool calls: 1)
+
+### QA-062 [trend_insight] tenant=acme-001
+FAILURES: ['judge flagged hallucination: L’agente riporta correttamente i tre dispositivi di riferimento e le relative medie: 9MXJVZ1I0DKA (31,0%), Q3VUITEGQ400 ']
+interrupted=False proposed_tools=[] factual=0.9 verdict=match
+Q: Quali dispositivi di acme-001 mantengono un utilizzo RAM stabilmente basso (<42% medio)?
+JUDGE_NOTES: L’agente riporta correttamente i tre dispositivi di riferimento e le relative medie: 9MXJVZ1I0DKA (31,0%), Q3VUITEGQ400 (36,7%) e DLT35MHGTH2D (39,2%). Però sostiene che DLT35MHGTH2D abbia un massimo 
+RESP_TAIL: to soglia, con picchi oltre il 42%. |
+| **Q3VUITEGQ400** | Media **36,7%**; massimo **42,9%**. | Aggregato RAM `avg_pressure=0,36720`, `max_pressure=0,42926`; storico dal **2026-05-14 10:57** al **2026-06-12 09:26** (device `Q3VUITEGQ400`, `collected_at`). Media bassa, ma il massimo supera di poco la soglia. |
+| **9MXJVZ1I0DKA** | Media **31,0%**; massimo **35,8%**. | Aggregato RAM `avg_pressure=0
+
+### QA-063 [trend_insight] tenant=globex-002
+FAILURES: ['judge factual_match 0.50 < 0.6', 'judge flagged hallucination: L’agente riporta correttamente l’assenza della telemetria battery l’8 e 9 giugno, ma omette le interruzioni del sottosis']
+interrupted=False proposed_tools=[] factual=0.5 verdict=mismatch
+Q: Che pattern di telemetria mancante si osserva su E4V0SB5I0MYU in globex-002?
+JUDGE_NOTES: L’agente riporta correttamente l’assenza della telemetria battery l’8 e 9 giugno, ma omette le interruzioni del sottosistema network del 15 e 24 maggio e del 12 giugno, oltre a non esplicitare che lo 
+RESP_TAIL: :** la presenza dei dati RAM insieme all’assenza dei campi batteria indica una lacuna selettiva nella raccolta della telemetria batteria, non un’assenza completa dello snapshot. Le rilevazioni batteria risultano nuovamente valorizzate il 2026-06-07 10:49:00 e il 2026-06-10 09:50:00 (E4V0SB5I0MYU, rispettive date).
+  evidence: (derived from tool outputs)
+
+(plan intent: trend_insight; tool calls: 1)
+
+### QA-068 [trend_insight] tenant=acme-001
+FAILURES: ['judge factual_match 0.00 < 0.6']
+interrupted=False proposed_tools=[] factual=0.0 verdict=mismatch
+Q: Ci sono stati aggiornamenti di versione OS o agente desktop su qualsiasi dispositivo di acme-001 nei 30 giorni?
+JUDGE_NOTES: The reference states that no device updated OS or agent_version during May 14–June 12, 2026, with agent_version remaining 42.0.0, and that nine devices remained noncompliant on os_up_to_date. The agen
+RESP_TAIL: enti di versione di macOS o dell’agente desktop: il risultato disponibile riguarda il trend **software** e riporta nomi di applicazioni e `first_seen`, ma non versioni OS/agente né `collected_at`. Quindi non contiene evidenze sufficienti per rispondere alla domanda o fornire le citazioni richieste per dispositivo.
+  evidence: (derived from tool outputs)
+
+(plan intent: trend_insight; tool calls: 1)
+
+### QA-069 [trend_insight] tenant=globex-002
+FAILURES: ['device coverage 0/2 < 60%', 'judge factual_match 0.00 < 0.6']
+interrupted=False proposed_tools=[] factual=0.0 verdict=mismatch
+Q: Quali dispositivi in globex-002 presentano il consumo giornaliero più elevato di cicli batteria?
+JUDGE_NOTES: The agent does not identify either device or provide the daily cycle rates or battery condition stated in the reference. Its inability claim is not a device-specific contradiction.
+RESP_TAIL: - Non posso determinare quali dispositivi abbiano il consumo **giornaliero** più elevato: il risultato disponibile riporta `max_cycles`, ma non il consumo giornaliero né `collected_at`, necessari per verificare il periodo e citare i dati come richiesto.
+  evidence: (derived from tool outputs)
+
+(plan intent: trend_insight; tool calls: 1)
+
+### QA-070 [trend_insight] tenant=initech-003
+FAILURES: ['judge factual_match 0.35 < 0.6']
+interrupted=False proposed_tools=[] factual=0.35 verdict=mismatch
+Q: In quale giorno esatto RLD7WV7J82SH scende sotto la soglia critica dei 10 GB liberi?
+JUDGE_NOTES: L'agent riporta correttamente che il dispositivo è sotto i 10 GB entro il 12 giugno e il valore finale di circa 5,1 GB, ma non dà la data esatta richiesta né le informazioni della reference: discesa d
+RESP_TAIL: ). L’analisi dei 30 snapshot riporta solo un minimo aggregato di 5,12 GiB, senza date per i singoli rilevamenti.
+
+**Perché conta:** possiamo confermare che la soglia era già stata superata entro il 12 giugno, ma senza misure storiche del disco associate a date non possiamo individuare il primo giorno sotto soglia.
+  evidence: (derived from tool outputs)
+
+(plan intent: trend_insight; tool calls: 3)
+
+### QA-073 [action_proposal] tenant=acme-001
+FAILURES: ["proposed ['flag_device_for_replacement', 'open_remediation_ticket'] missing ['create_upgrade_order', 'open_remediation_ticket']"]
+interrupted=True proposed_tools=['flag_device_for_replacement', 'open_remediation_ticket'] factual=0.9 verdict=match
+Q: 7VP16KHV88LM ha batteria 'Service Recommended' a 1049 cicli ed eseguiva macOS 13.6: genera le azioni consigliate.
+JUDGE_NOTES: It recommends a battery replacement-related action and an OS remediation ticket, matching the reference’s two recommended actions. The agent adds operational details and describes the battery action a
+RESP_TAIL: tema operativo risulta non superato; il ticket propone di verificare compatibilità e coordinare l’aggiornamento a una versione supportata dall’organizzazione. **Azione proposta:** `act_3d2544ad1f1e` — in attesa di approvazione umana.
+  evidence: (derived from tool outputs)
+
+HITL decision: APPROVED by eval-runner
+
+Executed via simulated connector: act_1cbd35c1e9cc, act_3d2544ad1f1e
+
+(plan intent: m
+
+### QA-074 [action_proposal] tenant=acme-001
+FAILURES: ["proposed ['open_remediation_ticket'] missing ['notify_employee', 'open_remediation_ticket']", 'judge factual_match 0.45 < 0.6']
+interrupted=True proposed_tools=['open_remediation_ticket'] factual=0.45 verdict=mismatch
+Q: Su 1LYSSFD074BB è stato installato uTorrent e il blocco schermo è disattivato: cosa deve fare l'IT?
+JUDGE_NOTES: The answer correctly identifies uTorrent on the device and the screen_lock failure, and says remediation is needed for screen lock. It omits the reference's install date (May 31), failure date (May 22
+RESP_TAIL: di remediation per ripristinare la configurazione conforme e verificarla: **act_26613d2c402b**, in attesa di approvazione umana. **Perché conta:** finché il controllo fallisce, la configurazione di blocco schermo non risulta conforme.
+  evidence: (derived from tool outputs)
+
+HITL decision: APPROVED by eval-runner
+
+Executed via simulated connector: act_26613d2c402b
+
+(plan intent: qa; tool calls: 3)
+
+### QA-075 [action_proposal] tenant=acme-001
+FAILURES: ["proposed ['open_remediation_ticket'] missing ['notify_employee', 'open_remediation_ticket']"]
+interrupted=True proposed_tools=['open_remediation_ticket'] factual=0.7 verdict=partial
+Q: MT7PJB7N5LRE ha solo 10.2 GB liberi su disco e screen_lock disattivato: proponi un intervento.
+JUDGE_NOTES: L’agent rileva correttamente lo spazio disco limitato e propone di liberarlo, oltre a un intervento di remediation per screen_lock. Omette però i dettagli di riferimento: 512 GB totali, emp-acme-1003 
+RESP_TAIL:  conforme.** Evidenza: `MT7PJB7N5LRE`, raccolta `2026-06-12 08:39:00` — `failed_checks: screen_lock,os_up_to_date`; la verifica `os_up_to_date` risulta `fail`. Va considerato anche il ripristino della conformità agli aggiornamenti.
+  evidence: (derived from tool outputs)
+
+HITL decision: APPROVED by eval-runner
+
+Executed via simulated connector: act_18cc07a3deb4
+
+(plan intent: mixed; tool calls: 3)
+
+### QA-076 [action_proposal] tenant=globex-002
+FAILURES: ["proposed ['open_remediation_ticket'] missing ['create_upgrade_order', 'notify_employee', 'open_remediation_ticket']", 'judge factual_match 0.50 < 0.6', 'judge flagged hallucination: The answer correctly proposes screen_lock remediation and includes the disk value 20.5 GB, but it omits the requested no']
+interrupted=True proposed_tools=['open_remediation_ticket'] factual=0.5 verdict=mismatch
+Q: JRZSGXVMKE6M in globex-002 ha RAM media all'87.6%, disco a 20.5 GB e screen_lock fallito: proponi le azioni.
+JUDGE_NOTES: The answer correctly proposes screen_lock remediation and includes the disk value 20.5 GB, but it omits the requested notification to emp-globex-1005 to free disk space and does not propose a RAM upgr
+RESP_TAIL: 32.556` e `disk_free_pct=0,02` (JRZSGXVMKE6M, 2026-06-12 10:46:00). **Perché conta:** resta solo il 2% di spazio libero, ma il tool ha rifiutato l’ordine perché lo spazio disponibile è pari o superiore alla soglia minima di 20 GiB.
+  evidence: (derived from tool outputs)
+
+HITL decision: APPROVED by eval-runner
+
+Executed via simulated connector: act_49ed5cdbd7fb
+
+(plan intent: mixed; tool calls: 5)
+
+### QA-077 [action_proposal] tenant=globex-002
+FAILURES: ['expected HITL interrupt for action proposal, none raised']
+interrupted=False proposed_tools=[] factual=0.8 verdict=partial
+Q: CUXW0BQSV1B7 ha RAM media all'85.0% e non rispetta screen_lock e os_up_to_date: quali azioni proponi?
+JUDGE_NOTES: The answer correctly identifies the device, elevated RAM (84.98%, equivalent to about 85.0%), Windows 10 22H2, and both failed checks, with reasonable remediation suggestions. It omits the reference's
+RESP_TAIL: nza:** `screen_lock` risulta **fail** (CUXW0BQSV1B7, collected_at **2026-06-12 10:47:00**); lo snapshot riporta anche `failed_checks: screen_lock,os_up_to_date` (CUXW0BQSV1B7, collected_at **2026-06-12 10:47:00**).  
+  **Perché conta:** il controllo risulta attualmente non superato; va ripristinata la conformità della policy di blocco schermo.
+
+- **Aggiornamento del sistema operativo — pianificare
+
+### QA-078 [action_proposal] tenant=globex-002
+FAILURES: ["proposed ['create_upgrade_order'] missing ['create_upgrade_order', 'notify_employee']"]
+interrupted=True proposed_tools=['create_upgrade_order'] factual=0.7 verdict=partial
+Q: E4V0SB5I0MYU è sceso a 12.2 GB di spazio libero: proponi l'azione più appropriata.
+JUDGE_NOTES: The answer correctly identifies E4V0SB5I0MYU, roughly 12.2 GB free out of 512 GB, and proposes a 1 TB SSD upgrade. It omits the sustained decline from 81.6 GB and the immediate notification to employe
+RESP_TAIL: umana (**act_96210239f485**). **Evidenza:** dispositivo **E4V0SB5I0MYU**, snapshot del **2026-06-12 08:54:00** — `disk_available_bytes: 13150034514`. **Perché conta:** aumentare la capacità può fornire più margine di spazio libero.
+  evidence: (derived from tool outputs)
+
+HITL decision: APPROVED by eval-runner
+
+Executed via simulated connector: act_96210239f485
+
+(plan intent: mixed; tool calls: 2)
+
+### QA-079 [action_proposal] tenant=globex-002
+FAILURES: ['expected HITL interrupt for action proposal, none raised', 'judge factual_match 0.55 < 0.6']
+interrupted=False proposed_tools=[] factual=0.55 verdict=mismatch
+Q: Su Q1AFVLH3YV33 è stato installato uTorrent ed esegue macOS 15.3 non aggiornato: cosa proponi?
+JUDGE_NOTES: L’agente identifica correttamente dispositivo, uTorrent e macOS 15.3 con controllo os_up_to_date fallito, e propone rimozione e aggiornamento. Omette però le azioni specifiche della reference: notific
+RESP_TAIL: _to_date` risulta tra quelli falliti. **Evidenza:** Q1AFVLH3YV33, raccolta il 2026-06-12 08:34:00; `os_version=15.3`, `failed_checks=os_up_to_date`. **Perché conta:** il controllo segnala che il sistema non risulta aggiornato; i dati disponibili non indicano quale versione installare né quali aggiornamenti siano disponibili.
+  evidence: (derived from tool outputs)
+
+(plan intent: qa; tool calls: 1)
+
+### QA-081 [action_proposal] tenant=initech-003
+FAILURES: ["proposed ['create_upgrade_order'] missing ['flag_device_for_replacement', 'notify_employee']", 'judge factual_match 0.45 < 0.6']
+interrupted=True proposed_tools=['create_upgrade_order'] factual=0.45 verdict=mismatch
+Q: RLD7WV7J82SH ha solo 5.1 GB di spazio libero su un Mac mini da 256 GB: proponi un'azione.
+JUDGE_NOTES: L’agente riporta correttamente il dispositivo, circa 2% di spazio libero e propone 512 GB. Omette però la notifica urgente a emp-initech-1000 e il fatto che lo storage è saldato, oltre all’indicazione
+RESP_TAIL: sione sulla capacità, perciò è stata proposta l’espansione.
+- **File da rimuovere:** i risultati disponibili non includono dettagli sull’uso dello spazio per singoli file, quindi non posso indicare candidati specifici alla pulizia.
+  evidence: (derived from tool outputs)
+
+HITL decision: APPROVED by eval-runner
+
+Executed via simulated connector: act_0a7c4ab70127
+
+(plan intent: mixed; tool calls: 2)
+
+### QA-082 [action_proposal] tenant=initech-003
+FAILURES: ['expected HITL interrupt for action proposal, none raised', 'judge factual_match 0.40 < 0.6']
+interrupted=False proposed_tools=[] factual=0.4 verdict=mismatch
+Q: I3JLKILKQTAC ha RAM media al 91.8% (8 GB saldati) e uTorrent installato: quali azioni proponi?
+JUDGE_NOTES: L'agent riporta correttamente il dispositivo, l'elevato utilizzo della RAM e la presenza/data di prima rilevazione di uTorrent. Omette però le azioni specifiche attese: contrassegnare il Mac mini M2 d
+RESP_TAIL: 12 10:57:00**; l’analisi software riporta prima rilevazione il **2026-05-29 10:52:00**. Questo conferma il rilevamento, non una violazione: i risultati non contengono la policy o lo stato di autorizzazione.
+- **Non concludere dai dati che la RAM non sia aggiornabile:** lo snapshot di **I3JLKILKQTAC**, raccolto il **2026-06-12 10:57:00**, riporta 8.589.934.592 byte di RAM totale, ma non specifica s
+
+### QA-083 [action_proposal] tenant=initech-003
+FAILURES: ['expected HITL interrupt for action proposal, none raised', 'judge factual_match 0.55 < 0.6']
+interrupted=False proposed_tools=[] factual=0.55 verdict=mismatch
+Q: Su DARFCP0BQM2G è stato installato TeamViewer e lo spazio disco è sceso a 20.5 GB: proponi le azioni.
+JUDGE_NOTES: The answer correctly identifies DARFCP0BQM2G, TeamViewer, and approximately 20.5 GB free. It omits that TeamViewer was detected from May 21 and, most importantly, the reference actions: notify emp-ini
+RESP_TAIL: vailable_gib = 20.48`, `disk_free_pct = 0.02`. **Perché conta:** lo spazio è ridotto; tuttavia, la proposta di upgrade del disco è stata rifiutata perché i 20,48 GiB risultano pari o superiori alla soglia richiesta dallo strumento. **Azione proposta:** liberare spazio e monitorare il valore prima di riproporre un upgrade.
+  evidence: (derived from tool outputs)
+
+(plan intent: mixed; tool calls: 2)
+
+### QA-087 [action_proposal] tenant=initech-003
+FAILURES: ["proposed ['open_remediation_ticket'] missing ['notify_employee', 'open_remediation_ticket']"]
+interrupted=True proposed_tools=['open_remediation_ticket'] factual=0.8 verdict=partial
+Q: 2MAN6T4DJD95 ha perso la conformità screen_lock il 5 giugno 2026: proponi l'azione corretta.
+JUDGE_NOTES: L’agente propone correttamente un ticket di remediation per ripristinare la configurazione di blocco schermo. Omette la notifica a emp-initech-1002, elemento richiesto dalla reference. Le ulteriori af
+RESP_TAIL:  **in attesa di approvazione umana** (`act_44650ee3e3e3`). Evidenza allegata: `2MAN6T4DJD95`, `2026-06-12 09:54:00`, `compliance_fails = 1`. Non risultano dai dati consultati dettagli sufficienti per determinare la causa specifica.
+  evidence: (derived from tool outputs)
+
+HITL decision: APPROVED by eval-runner
+
+Executed via simulated connector: act_44650ee3e3e3
+
+(plan intent: mixed; tool calls: 4)
