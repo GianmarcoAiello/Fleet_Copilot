@@ -13,6 +13,7 @@ from src.graph.state import AgentState, DraftClaim, EvidenceRef, ExecutionPlan, 
 from src.tools.read_tools import ALL_TOOLS, READ_TOOLS, set_repo
 
 MAX_ITERATIONS = 6
+TOOL_CALLS_PER_TURN = 4  # per-turn cap: bounds total calls to ~6×4 even if the model batches greedily
 
 PLANNER_SYSTEM = """You are the planner of a Fleet Copilot for IT administrators.
 Classify the request and emit a short execution plan.
@@ -36,6 +37,15 @@ Rules:
 - Device snapshots include employee_id: use it with notify_employee when the user
   asks to contact or warn a device's user (e.g. unauthorized software found).
 - If the user references a device outside your organization, the tools will refuse: report that.
+Tool economy (hard budget):
+- You have at most 6 turns and 4 tool calls per turn. Batch everything you need
+  into as few calls as possible.
+- For fleet-wide or filtered questions use query_fleet_snapshot (it supports
+  min_avail_disk_gb, os_version_lt, check, software filters) — ONE call answers
+  "which devices…" questions. Do NOT call query_device_history per device;
+  history is only for drilling into a device the snapshot flagged.
+- For 30-day patterns use analyze_time_series_trends — it is pre-computed.
+- Stop calling tools as soon as you can answer; answer, don't explore.
 """
 
 VERIFIER_SYSTEM = """You extract verifiable claims from the analyst's draft answer.
@@ -101,7 +111,6 @@ def planner(state: AgentState) -> dict:
 # ── 2. Analyst (explicit ReAct loop) ───────────────────────────────────────
 
 def analyst(state: AgentState) -> dict:
-    llm = get_llm().bind_tools(ALL_TOOLS)
     messages: list[AnyMessage] = state["messages"]
     if len(messages) == 1:
         messages = messages + [SystemMessage(content=ANALYST_SYSTEM)]
@@ -111,7 +120,16 @@ def analyst(state: AgentState) -> dict:
             content="Continue: use the tool results above, or call more tools, "
                     "then write your grounded answer with citations.")]
     iteration = state.get("iteration", 0)
-    out = llm.invoke(messages)
+    if iteration >= MAX_ITERATIONS:
+        # budget exhausted: final forced answer WITHOUT tools bound — the model
+        # literally cannot emit new tool calls, so the loop must terminate
+        messages = messages + [HumanMessage(
+            content="TOOL BUDGET EXHAUSTED: do not call any tool. Write your final "
+                    "grounded answer NOW from the evidence already collected, with "
+                    "citations; if something was not retrieved, say so explicitly.")]
+        out = get_llm().invoke(messages)
+    else:
+        out = get_llm().bind_tools(ALL_TOOLS).invoke(messages)
     return {"messages": messages + [out], "iteration": iteration + 1}
 
 
@@ -121,7 +139,17 @@ def analyst_tools(state: AgentState) -> dict:
     last = state["messages"][-1]
     tool_map = {t.name: t for t in ALL_TOOLS}
     outputs, msgs = [], []
-    for call in last.tool_calls:
+    calls = last.tool_calls
+    if len(calls) > TOOL_CALLS_PER_TURN:
+        # keep the first N, decline the rest with a proper tool result so the
+        # API contract stays intact and the model learns the budget
+        for call in calls[TOOL_CALLS_PER_TURN:]:
+            msgs.append(ToolMessage(
+                content="skipped: per-turn tool budget reached — fold this need "
+                        "into fewer calls or use a fleet-wide tool",
+                tool_call_id=call["id"]))
+        calls = calls[:TOOL_CALLS_PER_TURN]
+    for call in calls:
         tool = tool_map[call["name"]]
         try:
             result = tool.invoke({"args": call["args"], "id": call["id"],
@@ -138,11 +166,11 @@ def analyst_tools(state: AgentState) -> dict:
 
 def analyst_router(state: AgentState) -> str:
     last = state["messages"][-1]
-    if getattr(last, "tool_calls", None) and state.get("iteration", 0) < MAX_ITERATIONS:
+    if getattr(last, "tool_calls", None):
+        # pending calls must always be executed (the APIs require their results);
+        # the turn budget is enforced in analyst(), which stops binding tools
         return "execute"
-    if last.content and any(isinstance(getattr(last, "tool_calls", None), list) for _ in [0]) is False:
-        pass
-    return "verify" if not getattr(last, "tool_calls", None) else "execute"
+    return "verify"
 
 
 # ── 3. Grounding Verifier ───────────────────────────────────────────────────

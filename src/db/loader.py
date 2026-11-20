@@ -161,9 +161,25 @@ class Repository:
 
     # ── reads (tenant-scoped) ────────────────────────────────────────────
     def latest_snapshots(self, tenant_id: str, filters: str = "", params: tuple = ()) -> list[dict]:
+        # one call, full picture: latest snapshot per device with its disk,
+        # battery and compliance aggregates joined — the LLM can answer
+        # "which devices…" questions without per-device follow-up calls
         rows = self.con.execute(
             f"""
-            SELECT s.* FROM snapshots s
+            SELECT s.*,
+                   dv.total_bytes     AS disk_total_bytes,
+                   dv.available_bytes AS disk_available_bytes,
+                   b.percentage       AS battery_percentage,
+                   b.condition        AS battery_condition,
+                   b.cycle_count      AS battery_cycle_count,
+                   cf.fails           AS compliance_fails
+            FROM snapshots s
+            LEFT JOIN (SELECT snapshot_id, SUM(total_bytes)     AS total_bytes,
+                              SUM(available_bytes)              AS available_bytes
+                       FROM disk_volumes GROUP BY snapshot_id) dv USING (snapshot_id)
+            LEFT JOIN battery b USING (snapshot_id)
+            LEFT JOIN (SELECT snapshot_id, COUNT(*) AS fails FROM compliance_results
+                       WHERE status = 'fail' GROUP BY snapshot_id) cf USING (snapshot_id)
             WHERE s.company_id = ?
               AND s.collected_at = (SELECT max(collected_at) FROM snapshots w
                                     WHERE w.device_id = s.device_id)
