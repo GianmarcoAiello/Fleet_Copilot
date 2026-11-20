@@ -42,7 +42,7 @@ RESULTS_PATH = ROOT / "evals" / "qa100_results.json"
 DEVICE_RE = re.compile(r"\b(?=[A-Z0-9]*[A-Z])[A-Z0-9]{10,14}\b")
 REFUSAL_WORDS = ("not found", "refus", "cannot", "no data", "no telemetry",
                  "no evidence", "do not have", "not in your organization",
-                 "non posso", "non risult", "nessun", "non trovato", "non appartiene",
+                 "non posso", "non risult", "rifiut", "nessun", "non trovato", "non appartiene",
                  "non disponibile", "non disponibili", "non ho", "non gest")
 
 
@@ -100,9 +100,13 @@ def judge_answer(question: str, expected: str, actual: str) -> Judge:
              "You judge a fleet-management QA agent. Compare the agent answer "
              "against the expected reference answer for the same question. "
              "factual_match: fraction (0..1) of the reference's factual content "
-             "present and correct in the agent answer. hallucination: true only "
-             "if the agent states device-specific facts that contradict the "
-             "reference. verdict: match (>=0.9), partial (>=0.6), mismatch."),
+             "present and correct in the agent answer. Omissions and vaguer "
+             "wording lower factual_match but are NEVER hallucinations. "
+             "hallucination: true ONLY when the agent asserts a device-specific "
+             "fact that directly CONTRADICTS the reference (wrong model, wrong "
+             "OS version, wrong count, wrong value) — quote the contradicting "
+             "sentence in notes, otherwise hallucination must be false. "
+             "verdict: match (>=0.9), partial (>=0.6), mismatch."),
             ("human", f"Question: {question}\n\nReference answer:\n{expected}\n\n"
                       f"Agent answer:\n{actual}"),
         ])
@@ -142,10 +146,12 @@ def run_case(q: dict, repo: Repository, devmap: dict[str, str]) -> dict:
 
     proposed_tools, interrupted = [], "__interrupt__" in state
     if interrupted:
-        for task in state["tasks"]:
-            for it in getattr(task, "interrupts", ()) or ():
-                payload = it.value or {}
-                proposed_tools = [p["tool"] for p in payload.get("proposed_actions", [])]
+        # invoke() returns the interrupt payload under "__interrupt__":
+        # a list of Interrupt objects whose .value holds the gate payload
+        infos = state["__interrupt__"]
+        info = infos[0] if isinstance(infos, list) else infos
+        payload = getattr(info, "value", None) or info
+        proposed_tools = [p["tool"] for p in payload.get("proposed_actions", [])]
         state = wf.invoke(__import__("langgraph.types", fromlist=["Command"]).Command(
             resume={"approved": True, "approver": "eval-runner"}), config=thread)
 

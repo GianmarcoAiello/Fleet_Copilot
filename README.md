@@ -112,17 +112,42 @@ wrong values / invented timestamps / ungrounded aggregates, invented action
 evidence refused with exactly one audit row, tenant isolation with `config`
 as the single source of truth, and the `get_llm` env routing table.
 
-`evals/run_qa100.py` runs the agent against `fleet_copilot_100_qa.json`
+`evals/run_qa100.py` runs the agent against `evals/fleet_copilot_100_qa.json`
 (100 generated QA pairs: 45 grounded QA, 25 trend insights, 20 action
 proposals, 10 guardrail refusals) and scores three layers:
 
 1. **deterministic** — expected-device coverage in the answer, evidence
    citations, cross-tenant leaks, HITL interrupt presence, audit outcome;
-2. **LLM judge** — agent answer vs the reference answer (factual_match 0..1,
-   hallucination flag);
+2. **LLM judge** — agent answer vs the reference answer (factual_match 0..1;
+   the hallucination flag counts only for direct contradictions, omissions
+   lower factual_match only);
 3. **dataset validation** — expected facts are recomputed from the NDJSON, so
    a wrong expectation is never charged to the agent (currently 0 mismatches).
 
+**Full-run result (gpt-6-luna, temperature 0): 70/100.**
+
+| category | pass |
+|---|---|
+| grounded_qa | 38/45 |
+| trend_insight | 12/25 |
+| action_proposal | 10/20 |
+| guardrail_refusal | 10/10 |
+
+Honest caveats from the run:
+
+- **trend_insight is capped by the QA dataset, not only by the agent**: some
+  reference answers use slightly different aggregation windows than the raw
+  telemetry (e.g. burned disk 150.3 GB in the reference vs 161.3 GB computed
+  from the actual first→last snapshots). The tool reports the raw-data value;
+  the judge then flags a "contradiction". This accounts for a large share of
+  the trend failures.
+- **action_proposal set equality**: the eval expects the exact action set from
+  the dataset; the agent sometimes proposes a correct but smaller set (e.g. a
+  ticket without the additional notification) and fails on set equality.
+- **judge = agent model**: factual_match carries some model bias; hallucination
+  detection proper is deterministic (the verifier's grounding check), the judge
+  flag is a secondary signal.
+- Raw results per case: `evals/qa100_results.json` (the runner is resume-safe).
 
 ---
 

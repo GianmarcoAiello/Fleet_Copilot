@@ -39,8 +39,11 @@ Rules:
   and values are re-checked against the DB: mismatched or invented evidence is refused.
 - Actions also have sufficiency rules checked on the DB: a remediation ticket
   needs the cited check currently failing, a replacement flag needs battery
-  'Service Recommended', an upgrade needs real RAM/disk pressure. If the rule
-  fails the tool refuses — do not propose actions without reading telemetry first.
+  'Service Recommended', an upgrade needs real RAM/disk pressure.
+- ACTION REQUESTS MUST GO THROUGH THE TOOLS: when the user (or the plan intent)
+  asks for an action, gather the evidence with read tools, then CALL the
+  matching action tool in the same run. A prose recommendation without a tool
+  call does NOT fulfil the request — propose, never just describe.
 - Device snapshots include employee_id: use it with notify_employee when the user
   asks to contact or warn a device's user (e.g. unauthorized software found).
 - If the user references a device outside your organization, the tools will refuse: report that.
@@ -439,8 +442,14 @@ def build_workflow(repo, checkpointer=None):
     global _REPO_REF
     _REPO_REF = repo
     from langgraph.graph import END, StateGraph
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
     set_repo(repo)
     g = StateGraph(AgentState)
+    if checkpointer is not None and getattr(checkpointer, "serde", None) is None:
+        # register our pydantic state types: kills the msgpack deprecation
+        # warning on checkpoint deserialization
+        checkpointer.serde = JsonPlusSerializer(
+            allowed_msgpack_modules=[("src.graph.state",)])
     g.add_node("planner", planner)
     g.add_node("analyst", analyst)
     g.add_node("execute_tools", analyst_tools)

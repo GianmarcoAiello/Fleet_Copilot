@@ -253,15 +253,23 @@ class Repository:
         return [dict(zip(cols, r)) for r in rows]
 
     def disk_trend(self, tenant_id: str) -> list[dict]:
+        # per-snapshot SUM first: a device with multiple volumes must report the
+        # whole-disk first→last delta, not a first/last across mixed volume rows
         rows = self.con.execute(
             """
-            SELECT d.device_id, min(d.available_bytes)/1e9 AS min_avail_gb,
-                   (first(d.available_bytes ORDER BY s.collected_at)
-                    - last(d.available_bytes ORDER BY s.collected_at))/1e9 AS burned_gb,
+            WITH per_snap AS (
+                SELECT d.device_id, s.collected_at,
+                       SUM(d.available_bytes)/1e9 AS avail_gb
+                FROM disk_volumes d JOIN snapshots s USING (snapshot_id)
+                WHERE d.company_id = ?
+                GROUP BY d.snapshot_id, d.device_id, s.collected_at
+            )
+            SELECT device_id,
+                   min(avail_gb) AS min_avail_gb,
+                   (first(avail_gb ORDER BY collected_at)
+                    - last(avail_gb ORDER BY collected_at)) AS burned_gb,
                    count(*) AS n
-            FROM disk_volumes d JOIN snapshots s USING (snapshot_id)
-            WHERE d.company_id = ?
-            GROUP BY d.device_id ORDER BY min_avail_gb ASC
+            FROM per_snap GROUP BY device_id ORDER BY min_avail_gb ASC
             """,
             (tenant_id,),
         ).fetchall()
@@ -399,9 +407,10 @@ class Repository:
         pre-computed drift, so the model does not have to diff 25k chars of rows."""
         rows = self.con.execute(
             """
-            SELECT device_id, check_id, status, collected_at, severity
-            FROM compliance_results WHERE company_id = ?
-            ORDER BY device_id, check_id, collected_at
+            SELECT c.device_id, c.check_id, c.status, s.collected_at, c.severity
+            FROM compliance_results c JOIN snapshots s USING (snapshot_id)
+            WHERE c.company_id = ?
+            ORDER BY c.device_id, c.check_id, s.collected_at
             """,
             (tenant_id,)).fetchall()
         last: dict[tuple, str] = {}
