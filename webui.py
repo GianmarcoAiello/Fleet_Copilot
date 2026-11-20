@@ -497,7 +497,21 @@ async function consumeStream(url,body,ctx,st){
      ctx.badge.outerHTML=`<span class="chip run-badge" style="border-color:#8a6116;color:var(--amber)">⏸ awaiting approval</span>`;
      ctx.badge=ctx.card.querySelector('.run-badge');
      const acts=(e.payload&&e.payload.proposed_actions)||[];
-     const list=acts.map(a=>`<div class="trow call" data-aid="${a.action_id}"><span class="k">▸ ${a.tool}</span><span>${esc(a.device_id+' · '+(a.rationale||''))}</span></div>`).join('');
+     const ACT_DESC={
+       notify_employee:a=>`send this message to the employee of the device: "${a.args?.message||''}"`,
+       create_upgrade_order:a=>`create a ${a.args?.component||'?'} upgrade order (spec: ${a.args?.spec||'?'})`,
+       open_remediation_ticket:a=>`open a remediation ticket for check "${a.args?.check_id||'?'}" — note: ${a.args?.note||''}`,
+       flag_device_for_replacement:a=>`flag the device for replacement — reason: ${a.args?.reason||''}`
+     };
+     const list=acts.map(a=>{
+       const ev=(a.evidence||[]).map(x=>`${x.device_id}@${String(x.collected_at).slice(0,19)} ${x.metric}=${x.value}`).join(' · ');
+       const desc=(ACT_DESC[a.tool]||(()=>a.rationale||''))(a);
+       return `<div class="trow call" data-aid="${a.action_id}"><span class="k">▸ ${a.tool}</span><span>${esc(a.device_id+' — '+desc)}</span></div>`+
+        (ev?`<div class="trow result"><span class="k">evidence</span><span>${esc(ev)}</span></div>`
+           :`<div class="trow"><span class="k">evidence</span><span>none attached</span></div>`)+
+        `<div class="trow"><span class="k">on approve</span><span>action is recorded as APPROVED in the audit log</span></div>`+
+        `<div class="trow"><span class="k">on reject</span><span>action is recorded as REFUSED in the audit log</span></div>`;
+     }).join('');
      ctx.answer.innerHTML=`<div class="hitl-banner">⏸ <b>HITL gate</b> — ${acts.length} action(s) proposed.
        ${list}
        <div class="row" style="margin-top:10px">

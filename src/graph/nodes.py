@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
@@ -99,7 +100,7 @@ def analyst_tools(state: AgentState) -> dict:
                                   "type": "tool_call",
                                   **{"config": {"configurable": {"tenant_id": state["tenant_id"]}}}})
             outputs.append({"tool": call["name"], "args": call["args"],
-                            "result": result.content[:4000]})
+                            "result": result.content})
             msgs.append(ToolMessage(content=result.content, tool_call_id=call["id"]))
         except Exception as exc:  # noqa: BLE001 — surface the failure to the model
             msgs.append(ToolMessage(content=f"tool error: {exc}", tool_call_id=call["id"]))
@@ -118,14 +119,21 @@ def analyst_router(state: AgentState) -> str:
 
 # ── 3. Grounding Verifier ───────────────────────────────────────────────────
 
+DEVICE_ID_RE = re.compile(
+    r"\b(?=[A-Z0-9]*[A-Z])[A-Z0-9]{10,14}\b")  # must contain a letter: keeps out byte counts
+
+
 def _evidence_pool(tool_outputs: list[dict]) -> set[str]:
+    """Device ids CONFIRMED by tool RESULTS. Deliberately excludes tool-call
+    args and error/refusal replies: "device 'X' not found in your organization"
+    mentions the id too, but a failed lookup proves the device was NOT found —
+    counting it enabled approving actions for cross-tenant devices."""
     pool = set()
     for out in tool_outputs:
-        pool.add(str(out["args"].get("device_id", "")))
         text = str(out["result"])
-        import re
-        pool.update(re.findall(r"\b[A-Z0-9]{10,14}\b", text))  # device/serial-shaped ids
-        pool.update(re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", text))
+        if text.startswith("error:") or '"error"' in text or '"refused"' in text:
+            continue
+        pool.update(DEVICE_ID_RE.findall(text))
     return pool
 
 
@@ -155,7 +163,7 @@ def verifier(state: AgentState) -> dict:
     verified, unsupported = [], []
     for c in claims:
         ids = {e.device_id for e in c.evidence} | set(
-            __import__("re").findall(r"\b[A-Z0-9]{10,14}\b", c.claim))
+            DEVICE_ID_RE.findall(c.claim))
         if not ids or ids.issubset(pool):
             verified.append(c)
         else:
@@ -183,21 +191,31 @@ def hitl_gate(state: AgentState) -> dict:
     proposals = []
     for act in plan.action_requests:
         ok = all(e.device_id in pool for e in act.evidence)
+        # a device never confirmed by any tool result (not found / cross-tenant)
+        # must be refused here, BEFORE asking a human to approve an action on it
+        if act.device_id not in pool:
+            if _REPO_REF is not None:
+                _REPO_REF.audit(state["tenant_id"], event="refusal", tool=act.tool,
+                                args=act.args, evidence=[e.model_dump() for e in act.evidence],
+                                detail=f"device {act.device_id} not confirmed by any tool result")
+            continue
         # if the planner sent no structured evidence, harvest device/timestamp
         # facts for this device from the captured tool outputs so the proposal
         # is self-contained and auditable
-        evidence = [e.model_dump() for e in act.evidence]
+        # keep evidence typed as EvidenceRef; dump to dicts only at the repo/interrupt boundary
+        evidence = list(act.evidence)
         if not evidence:
             for out in state.get("tool_outputs", []):
                 text = str(out["result"])
+                if text.startswith("error:") or '"error"' in text or '"refused"' in text:
+                    continue  # never fabricate evidence from a failed lookup
                 if act.device_id in text:
-                    import re
                     ts = re.search(rf"{act.device_id}\|(\d{{4}}-\d{{2}}-\d{{2}}T[^\"']*)", text)
                     if ts:
-                        evidence = [{"device_id": act.device_id,
-                                     "collected_at": ts.group(1)[:19],
-                                     "metric": "snapshot",
-                                     "value": f"referenced in {out['tool']} output"}]
+                        evidence = [EvidenceRef(device_id=act.device_id,
+                                     collected_at=ts.group(1)[:19],
+                                     metric="snapshot",
+                                     value=f"referenced in {out['tool']} output")]
                         break
         # link to the real DB action created by the tool call (if any), so the
         # UI can resolve it by id without a second lookup
@@ -212,6 +230,9 @@ def hitl_gate(state: AgentState) -> dict:
             "action_id": real or f"unproposed_{len(proposals)}",
             "evidence": evidence,
             "rationale": act.rationale or ("evidence-grounded" if ok else "INSUFFICIENT EVIDENCE")}))
+    if not proposals:
+        # every action was refused pre-gate: never bother the human with an empty ask
+        return {"approval": None, "approved": False}
     decision = interrupt({
         "proposed_actions": [p.model_dump() for p in proposals],
         "evidence_pool": sorted(_evidence_pool(state.get("tool_outputs", []))),

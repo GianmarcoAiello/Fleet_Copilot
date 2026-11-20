@@ -112,11 +112,28 @@ def query_compliance(
     config: Annotated[RunnableConfig, InjectedToolArg],
     status: Optional[str] = Field(default=None, description="pass | fail"),
     severity: Optional[str] = Field(default=None, description="low | medium | high"),
+    scope: str = Field(default="latest",
+                       description="latest = one row per device+check (most recent collected_at, "
+                                   "use for current-state questions); all = full 30-day history"),
 ) -> str:
     """Compliance results across all devices of the caller's company."""
     t = _tenant(config)
     assert _repo is not None
-    return json.dumps({"rows": _slim(_repo.compliance(t, status, severity), 40)}, default=str)
+    rows = _repo.compliance(t, status, severity)  # ordered device_id, collected_at DESC
+    if scope != "all":
+        latest: dict[tuple, dict] = {}
+        for r in rows:  # first occurrence per key = most recent snapshot
+            key = (r["device_id"], r["check_id"])
+            if key not in latest:
+                latest[key] = r
+        rows = list(latest.values())
+    total = len(rows)
+    slim = _slim(rows, 40)
+    out: dict = {"rows": slim, "total_matching": total}
+    if total > len(slim):
+        out["truncated"] = True
+        out["note"] = f"showing {len(slim)} of {total} rows"
+    return json.dumps(out, default=str)
 
 
 # ── action tools (propose-only; HITL gate handles approval) ────────────────
