@@ -379,8 +379,10 @@ def verifier(state: AgentState) -> dict:
         claims = []
     if not claims and draft.strip():
         # fallback: surface the whole draft, but labelled NEUTRALLY — claim
-        # extraction failed, so "NOT stated (insufficient evidence)" would be
-        # a false statement about a possibly well-grounded draft
+        # extraction failed (exception OR empty list, i.e. nothing extracted),
+        # so "NOT stated (insufficient evidence)" would be a false statement
+        # about a possibly well-grounded draft
+        extraction_failed = True
         claims = [DraftClaim(claim=draft.strip(), evidence=[])]
     pool = _evidence_pool(state.get("tool_outputs", []))
     idx = _fact_index(state.get("tool_outputs", []))

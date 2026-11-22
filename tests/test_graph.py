@@ -111,21 +111,26 @@ def test_messages_grow_linearly_and_ids_unique(repo, monkeypatch):
 
 # ── 2. verifier: value, timestamp and ungrounded aggregates are rejected ────
 
-def _verifier_state(monkeypatch, tool_outputs, claims):
-    class C:  # minimal DraftClaim stand-in
-        def __init__(self, claim, evidence):
-            self.claim, self.evidence = claim, evidence
-    from src.graph.state import EvidenceRef
-    parsed = [C(c["claim"], [EvidenceRef(**e) for e in c.get("evidence", [])])
-              for c in claims]
+def _verifier_state(monkeypatch, tool_outputs, claims, empty_extraction=False,
+                    draft="draft"):
+    from src.graph.state import DraftClaim, EvidenceRef
     fake = FakeLLM([])
-    fake.verifier_claims = [{"claim": p.claim,
-                             "evidence": [e.model_dump() for e in p.evidence]}
-                            for p in parsed]
+    if empty_extraction:
+        # extractor runs fine but returns [] → the fallback path fires
+        fake.verifier_claims = []
+        parsed_claims = [DraftClaim(claim=claims[0]["claim"], evidence=[])]
+    else:
+        parsed = [DraftClaim(claim=c["claim"],
+                             evidence=[EvidenceRef(**e) for e in c.get("evidence", [])])
+                  for c in claims]
+        fake.verifier_claims = [{"claim": p.claim,
+                                 "evidence": [e.model_dump() for e in p.evidence]}
+                                for p in parsed]
+        parsed_claims = parsed
     fake.structured_payload = nodes.ExecutionPlan(intent="qa", steps=[])
     monkeypatch.setattr(nodes, "get_llm", lambda temperature=0.0: fake)
-    return {"messages": [AIMessage(content="draft")], "tool_outputs": tool_outputs,
-            "tenant_id": "acme-001"}
+    return {"messages": [AIMessage(content=draft)], "tool_outputs": tool_outputs,
+            "tenant_id": "acme-001"}, parsed_claims
 
 
 def test_verifier_rejects_wrong_value_and_invented_timestamp(repo, monkeypatch):
@@ -133,7 +138,7 @@ def test_verifier_rejects_wrong_value_and_invented_timestamp(repo, monkeypatch):
         "count": 1, "rows": [{"device_id": "MT7PJB7N5LRE",
                               "collected_at": "2026-06-12T08:39:00Z",
                               "disk_available_bytes": 10995116278}]})}]
-    st = _verifier_state(monkeypatch, outs, [
+    st, _ = _verifier_state(monkeypatch, outs, [
         {"claim": "device has 99 GB free", "evidence": [
             {"device_id": "MT7PJB7N5LRE", "collected_at": "2026-06-12T08:39:00Z",
              "metric": "disk_available_bytes", "value": "99"}]},
@@ -158,12 +163,44 @@ def test_verifier_accepts_matching_value(repo, monkeypatch):
         "count": 1, "rows": [{"device_id": "MT7PJB7N5LRE",
                               "collected_at": "2026-06-12T08:39:00Z",
                               "disk_available_bytes": 10995116278}]})}]
-    st = _verifier_state(monkeypatch, outs, [
+    st, _ = _verifier_state(monkeypatch, outs, [
         {"claim": "device has 10995116278 bytes free", "evidence": [
             {"device_id": "MT7PJB7N5LRE", "collected_at": "2026-06-12 08:39:00",
              "metric": "disk_available_bytes", "value": "10995116278"}]}])
     out = nodes.verifier(st)
     assert len(out["verified_claims"]) == 1 and not out["unsupported"]
+
+
+def test_verifier_empty_extraction_well_grounded_draft_goes_unverified(repo, monkeypatch):
+    """B1: extractor returns [] on a well-grounded draft → neutral `unverified`
+    label, NOT 'NOT stated (insufficient evidence)'."""
+    outs = [{"tool": "query_fleet_snapshot", "args": {}, "result": json.dumps({
+        "count": 1, "rows": [{"device_id": "1LYSSFD074BB",
+                              "collected_at": "2026-06-12T09:47:00Z",
+                              "battery_cycle_count": 532}]})}]
+    st, _ = _verifier_state(
+        monkeypatch, outs,
+        [{"claim": "Device 1LYSSFD074BB shows 532 battery cycles on 2026-06-12",
+          "evidence": []}],
+        empty_extraction=True,
+        draft="Device 1LYSSFD074BB shows 532 battery cycles on 2026-06-12")
+    out = nodes.verifier(st)
+    assert out["unverified"] and not out["unsupported"], out
+
+
+def test_verifier_empty_extraction_unknown_device_stays_unsupported(repo, monkeypatch):
+    """B1: empty extraction with an unknown device in the draft is still a
+    grounding failure, not a neutral pass."""
+    outs = [{"tool": "query_fleet_snapshot", "args": {}, "result": json.dumps({
+        "count": 1, "rows": [{"device_id": "1LYSSFD074BB",
+                              "collected_at": "2026-06-12T09:47:00Z"}]})}]
+    st, _ = _verifier_state(
+        monkeypatch, outs,
+        [{"claim": "Device XSU9UUDGU6AC-UNKNOWN reported failures", "evidence": []}],
+        empty_extraction=True,
+        draft="Device XSU9UUDGU6AC-UNKNOWN reported failures")
+    out = nodes.verifier(st)
+    assert out["unsupported"] and not out["unverified"], out
 
 
 # ── 3. invented evidence refused, audit written exactly once ────────────────

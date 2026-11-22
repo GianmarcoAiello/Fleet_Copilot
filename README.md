@@ -151,7 +151,7 @@ claiming disk data was missing), new `gaps` and `versions` trends and dated
 disk/battery/software trends, one deterministic retry when an action request
 produced no proposal, prompt rules for choosing the action. They target the
 failure classes above (tool gaps behind judge contradictions; 4 action requests
-with no proposal; 7 with a smaller action set). The expected effect is a
+with no proposal; 5 with a subset of the reference set). The expected effect is a
 hypothesis: only the mechanics are covered by the stub-LLM tests, there is no
 live measurement.
 
@@ -169,10 +169,13 @@ Honest caveats:
   was **not measured**. What stayed stable is the deterministic layer
   (86 → 85 of 100).
 - **action_proposal** (9/20, same on the deterministic layer): 11 failures — 4
-  requests ended with no proposal at all (no HITL interrupt) and 7 with a
-  correct but smaller action set than the reference. The set-equality check is
-  strict by design; the "no proposal" cases are real agent misses, and are
-  what the retry and prompt changes above target.
+  requests ended with no proposal at all (no HITL interrupt); 5 proposed a
+  subset of the reference set (typically the ticket without the notification);
+  2 chose different actions. One of these (QA-081) expects a replacement flag
+  for a low-disk desktop, which the sufficiency rule (battery grounds only)
+  refuses by design: a reference/policy inconsistency, not an agent error. The
+  "no proposal" cases are real agent misses, and are what the retry and prompt
+  changes above target.
 - **judge = agent model**: factual_match carries some model bias; hallucination
   detection proper is deterministic (the verifier's grounding check), the judge
   flag is a secondary signal.
@@ -196,6 +199,12 @@ webui.py              stdlib HTTP server + SSE streaming (no web framework)
 cli.py / run_once.py / run_hitl.py / actions_cli.py
 evals/                deterministic suite + 100-QA live runner
 ```
+
+> **Note on the web UI**: it is deliberately basic — a minimal surface whose
+> only job is to make the agent's behavior observable (live pipeline, tool
+> trace, grounding verdict, HITL decisions, audit trail). It is a
+> demonstration instrument, not a product shell: polish was intentionally
+> spent on the evidence surfaces, not on the chrome.
 
 **Explicit loop, not a prompt wrapper.** The planner emits a typed
 `ExecutionPlan` (intent: `qa | trend_insight | action_request | mixed`, steps —
