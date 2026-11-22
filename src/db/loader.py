@@ -190,12 +190,18 @@ class Repository:
                         / "device-telemetry-dataset.ndjson")
             self.con = duckdb.connect(self.db_path, read_only=False)
 
+    EXPECTED_TABLES = ("snapshots", "disk_volumes", "battery", "compliance_results",
+                       "installed_software", "network_interfaces", "actions", "audit_log")
+
     def _needs_bootstrap(self) -> bool:
         try:
-            row = self.con.execute(
-                "SELECT count(*) FROM information_schema.tables "
-                "WHERE table_name = 'snapshots'").fetchone()
-            return not row or not row[0]
+            rows = self.con.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main'").fetchall()
+            present = {r[0] for r in rows}
+            # an older DB file (pre-migration schema) is rebuilt from source:
+            # everything in it is derived data
+            return not set(self.EXPECTED_TABLES).issubset(present)
         except duckdb.Error:
             return True
 
