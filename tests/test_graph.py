@@ -144,9 +144,11 @@ def test_verifier_rejects_wrong_value_and_invented_timestamp(repo, monkeypatch):
         {"claim": "device has 2 GB free", "evidence": [
             {"device_id": "MT7PJB7N5LRE", "collected_at": "2026-06-12T08:39:00Z",
              "metric": "free_gb", "value": "2"}]},
+        {"claim": "Snapshot collected on 2026-06-12 for MT7PJB7N5LRE", "evidence": []},
+        {"claim": "532 device fail on encryption", "evidence": []},
     ])
     out = nodes.verifier(st)
-    assert len(out["unsupported"]) == 4, out
+    assert len(out["unsupported"]) == 5, out
     assert out["reground_attempts"] == 1
     assert "NOT supported" in out["reground_feedback"]
 
@@ -242,6 +244,35 @@ def test_repo_bootstraps_from_empty_path(tmp_path):
     n = r.con.execute("SELECT count(*) FROM snapshots").fetchone()[0]
     assert n == 750
     assert r.latest_snapshot_row("acme-001", "MT7PJB7N5LRE") is not None
+
+
+def test_repo_creates_missing_parent_dirs(tmp_path):
+    """C-1 regression: DuckDB does not mkdir — a fresh clone's data/ folder
+    does not exist and every entry point failed on first open."""
+    r = Repository(tmp_path / "non" / "esiste" / "x.duckdb")
+    assert r.latest_snapshot_row("acme-001", "MT7PJB7N5LRE") is not None
+
+
+def test_bootstrap_seeds_demo_actions(tmp_path):
+    """C5: first-run demo rows go through the real app functions — one pending,
+    one executed, one refusal — and a reopen does not duplicate them."""
+    r = Repository(tmp_path / "fresh.duckdb")
+    acts = r.con.execute("SELECT tool, status FROM actions").fetchall()
+    statuses = sorted(s for _, s in acts)
+    assert statuses == ["executed", "proposed"]
+    events = [e["event"] for e in r.audit_tail("acme-001", limit=20)]
+    assert {"proposal", "approved", "execution", "refusal"} <= set(events)
+    # reopen: no duplicates
+    r2 = Repository(tmp_path / "fresh.duckdb")
+    assert r2.con.execute("SELECT count(*) FROM actions").fetchone()[0] == len(acts)
+
+
+def test_compliance_trend_payload_uses_trend_key(repo):
+    """C2 regression: the key was emitted as the variable name, not 'trend'."""
+    from src.tools.read_tools import analyze_time_series_trends
+    out = json.loads(analyze_time_series_trends.invoke(
+        {"trend": "compliance"}, config={"configurable": {"tenant_id": "acme-001"}}))
+    assert out["trend"] == "compliance" and "transitions" in out
 
 
 # ── QA-failure fixes: richer trend/history data for grounded answers ────────

@@ -53,6 +53,7 @@ class AgentState(TypedDict, total=False):
     draft_claims: list[DraftClaim]
     verified_claims: list[DraftClaim]
     unsupported: list[str]
+    unverified: list[str]
     reground_feedback: str
     reground_attempts: int
     action_nudges: int               # deterministic action-ask retries (bounded)

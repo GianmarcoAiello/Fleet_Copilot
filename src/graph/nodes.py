@@ -349,9 +349,13 @@ def _claim_problems(c, idx: dict, pool: set[str]) -> list[str]:
                                 f"{e.value!r}, tool results say {bucket[e.metric]!r}")
     # numbers asserted with no evidence refs: only trustworthy anchors are the
     # tool-level aggregates (count / total_matching) — a match against ANY
-    # payload field (e.g. a battery cycle count) would validate invented claims
+    # payload field (e.g. a battery cycle count) would validate invented claims.
+    # Device ids and dates in the claim text are stripped first: their digits
+    # are not asserted quantities.
     if not c.evidence:
-        nums = re.findall(r"\d+(?:\.\d+)?", c.claim)
+        text = DEVICE_ID_RE.sub(" ", c.claim)
+        text = re.sub(r"\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?", " ", text)
+        nums = re.findall(r"\d+(?:\.\d+)?", text)
         if nums:
             aggs = idx.get(("__agg__", ""), {})
             values = [float(v) for v in aggs.values()
@@ -364,22 +368,33 @@ def _claim_problems(c, idx: dict, pool: set[str]) -> list[str]:
 
 def verifier(state: AgentState) -> dict:
     draft = _draft_text(state["messages"][-1])
-    claims = []
+    claims, extraction_failed = [], False
     try:
         llm = get_llm().with_structured_output(
             __import__("pydantic").RootModel[list[DraftClaim]], method="function_calling")
         claims = llm.invoke([SystemMessage(content=VERIFIER_SYSTEM),
                              HumanMessage(content=f"Draft:\n{draft}")]).root
     except Exception:  # noqa: BLE001 — claim extraction must never erase an answer
+        extraction_failed = True
         claims = []
     if not claims and draft.strip():
-        # fall back: surface the whole draft as a single unverified-but-sourced answer
+        # fallback: surface the whole draft, but labelled NEUTRALLY — claim
+        # extraction failed, so "NOT stated (insufficient evidence)" would be
+        # a false statement about a possibly well-grounded draft
         claims = [DraftClaim(claim=draft.strip(), evidence=[])]
     pool = _evidence_pool(state.get("tool_outputs", []))
     idx = _fact_index(state.get("tool_outputs", []))
-    verified, unsupported = [], []
+    verified, unsupported, unverified = [], [], []
     for c in claims:
-        if _claim_problems(c, idx, pool):
+        if extraction_failed:
+            # neutral path: only check that cited device ids are confirmed;
+            # the fine-grained value checks need extracted evidence refs
+            ids = {e.device_id for e in c.evidence} | set(DEVICE_ID_RE.findall(c.claim))
+            if ids and not ids.issubset(pool):
+                unsupported.append(c.claim)
+            else:
+                unverified.append(c.claim)
+        elif _claim_problems(c, idx, pool):
             unsupported.append(c.claim)
         else:
             verified.append(c)
@@ -402,6 +417,7 @@ def verifier(state: AgentState) -> dict:
     if action_fb:
         feedback = (feedback + "\n\n" + action_fb).strip()
     return {"verified_claims": verified, "unsupported": unsupported,
+            "unverified": unverified,
             "reground_feedback": feedback,
             "reground_attempts": attempts + (1 if unsupported else 0),
             "action_nudges": nudges + (1 if action_fb else 0),
@@ -511,6 +527,9 @@ def formatter(state: AgentState) -> dict:
         parts.append("\n".join(lines))
     if state.get("unsupported"):
         parts.append("NOT stated (insufficient evidence): " + "; ".join(state["unsupported"]))
+    if state.get("unverified"):
+        parts.append("UNVERIFIED (claim extraction failed — check against the "
+                     "tool trace): " + "; ".join(state["unverified"]))
     if state.get("approval") is not None:
         parts.append(f"HITL decision: {'APPROVED' if state.get('approved') else 'REJECTED'} "
                      f"by {state.get('approval', {}).get('approver', 'unknown')}")

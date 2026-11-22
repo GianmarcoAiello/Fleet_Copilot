@@ -151,6 +151,7 @@ def _insert_many(con, table: str, rows: list[tuple], ncols: int) -> None:
 
 def load_ndjson(db_path: str | os.PathLike, ndjson_path: str | os.PathLike) -> int:
     """Load NDJSON into a fresh DuckDB file. Returns number of snapshots."""
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     Path(db_path).unlink(missing_ok=True)
     con = duckdb.connect(str(db_path))
     con.execute(SCHEMA)
@@ -181,6 +182,9 @@ class Repository:
 
     def __init__(self, db_path: str | os.PathLike, bootstrap: bool = True):
         self.db_path = str(db_path)
+        # DuckDB does not create missing parent directories (e.g. data/ on a
+        # fresh clone) — do it here or every entry point fails on first open
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.con = duckdb.connect(self.db_path, read_only=False)
         if bootstrap and self._needs_bootstrap():
             # clean-clone convenience: rebuild from the NDJSON so every entry

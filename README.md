@@ -126,24 +126,53 @@ proposals, 10 guardrail refusals) and scores three layers:
    (device counts, OS breakdowns; currently 0 mismatches). It does not yet
    recompute disk/battery aggregates — the trend unit caveat below applies.
 
-**Full-run result (gpt-6-luna, temperature 0): 70/100.**
+**QA-100 result (gpt-6-luna, temperature 0, commit `0c64439`): 64/100 overall.**
+This is the last full run. It **predates** the QA-failure fixes listed below,
+which were not re-measured (inference cost).
 
-| category | pass |
-|---|---|
-| grounded_qa | 38/45 |
-| trend_insight | 12/25 |
-| action_proposal | 10/20 |
-| guardrail_refusal | 10/10 |
+| category | overall pass | deterministic layer only |
+|---|---|---|
+| grounded_qa | 30/45 | 44/45 |
+| trend_insight | 15/25 | 22/25 |
+| action_proposal | 9/20 | 9/20 |
+| guardrail_refusal | 10/10 | 10/10 |
+| **total** | **64/100** | **85/100** |
 
-Honest caveats from the run:
+*overall* requires both layers to pass; *deterministic layer only* ignores the
+LLM judge (device coverage, citations, tenant leaks, HITL interrupt, proposed
+action set, audit outcome). Mean judge `factual_match`: 0.71 over 90 judged
+cases. The deterministic layer is the stable one: an earlier run (commit
+`d44a492`, 70/100 overall) scored 86/100 on it; judge-only failures moved from
+16 to 21.
+
+**Changes after this run (not re-measured):** per-snapshot disk and network
+fields exposed in device history (the run's judge contradictions included answers
+claiming disk data was missing), new `gaps` and `versions` trends and dated
+disk/battery/software trends, one deterministic retry when an action request
+produced no proposal, prompt rules for choosing the action. They target the
+failure classes above (tool gaps behind judge contradictions; 4 action requests
+with no proposal; 7 with a smaller action set). The expected effect is a
+hypothesis: only the mechanics are covered by the stub-LLM tests, there is no
+live measurement.
+
+Honest caveats:
 
 - **Units**: disk aggregates are **GiB (2^30 bytes)** across tools, snapshots
   and the QA reference answers. An earlier run mixed GB-decimal (tool) with
   GiB (references) and the judge mis-read the difference as contradictions;
-  the unit fix is why trend scores move between runs.
-- **action_proposal set equality**: the eval expects the exact action set from
-  the dataset; the agent sometimes proposes a correct but smaller set (e.g. a
-  ticket without the additional notification) and fails on set equality.
+  the unit fix is one of the changes behind the trend score moving between
+  the two stored runs.
+- **Run history, not variance**: an earlier run (commit `d44a492`) scored
+  70/100 overall, the committed one 64/100. The code changed in between (units,
+  verifier hardening, executor, disk fields), so the 22 cases that flipped mix
+  code effects and judge sensitivity. Pure run-to-run noise of a fixed agent
+  was **not measured**. What stayed stable is the deterministic layer
+  (86 → 85 of 100).
+- **action_proposal** (9/20, same on the deterministic layer): 11 failures — 4
+  requests ended with no proposal at all (no HITL interrupt) and 7 with a
+  correct but smaller action set than the reference. The set-equality check is
+  strict by design; the "no proposal" cases are real agent misses, and are
+  what the retry and prompt changes above target.
 - **judge = agent model**: factual_match carries some model bias; hallucination
   detection proper is deterministic (the verifier's grounding check), the judge
   flag is a secondary signal.
@@ -151,9 +180,6 @@ Honest caveats from the run:
   the **Pending actions** tab allows approving/rejecting each action separately.
 - The planner/analyst prompts were iterated against failures of this QA set, so
   the reported scores are a development measure, not a held-out one.
-- **Run-to-run variance**: the same model at temperature 0 scored 38/45 and
-  30/45 on grounded_qa across two runs — a single 100-question run with an LLM
-  judge carries several points of noise.
 - Raw results per case: `evals/qa100_results.json` (the runner is resume-safe).
 
 ---
