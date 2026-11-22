@@ -189,6 +189,31 @@ class Repository:
             load_ndjson(self.db_path, Path(__file__).resolve().parent.parent.parent
                         / "device-telemetry-dataset.ndjson")
             self.con = duckdb.connect(self.db_path, read_only=False)
+            self._seed_demo_actions()
+
+    def _seed_demo_actions(self):
+        """First-run demo rows so Pending/Audit are not empty on a clean clone.
+        Everything goes through the real application functions (propose →
+        resolve → execute), so the audit trail matches real usage."""
+        try:
+            dev = next(r["device_id"] for r in self.latest_snapshots("acme-001")
+                       if r.get("battery_condition") == "Service Recommended")
+        except StopIteration:
+            return
+        self.propose_action(
+            "acme-001", dev, "flag_device_for_replacement", {"reason": "battery degraded"},
+            [{"device_id": dev, "collected_at": "2026-06-12", "metric": "battery_condition",
+              "value": "Service Recommended"}])                    # stays proposed
+        aid = self.propose_action(
+            "acme-001", dev, "create_upgrade_order",
+            {"component": "battery", "spec": "replacement"},
+            [{"device_id": dev, "collected_at": "2026-06-12", "metric": "battery_condition",
+              "value": "Service Recommended"}])
+        self.resolve_action("acme-001", aid, True, "demo-seed")    # approved
+        self.execute_action("acme-001", aid)                       # executed
+        self.audit("acme-001", event="refusal", tool="notify_employee",
+                   args={"message": "demo"}, evidence=[],
+                   detail="demo refusal: no assigned employee on device")
 
     EXPECTED_TABLES = ("snapshots", "disk_volumes", "battery", "compliance_results",
                        "installed_software", "network_interfaces", "actions", "audit_log")
@@ -199,8 +224,9 @@ class Repository:
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = 'main'").fetchall()
             present = {r[0] for r in rows}
-            # an older DB file (pre-migration schema) is rebuilt from source:
-            # everything in it is derived data
+            # demo scope: on a schema change the whole file is rebuilt from the
+            # NDJSON, which also resets actions/audit_log (state is NOT derived
+            # data; see README)
             return not set(self.EXPECTED_TABLES).issubset(present)
         except duckdb.Error:
             return True

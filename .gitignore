@@ -21,3 +21,6 @@ __pycache__/
 *.pyc
 *.egg-info/
 build/
+
+# eval working dumps
+evals/fail_analysis_raw.txt

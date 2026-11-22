@@ -59,10 +59,15 @@ Rules:
   propose, never just describe. If one action tool refuses (sufficiency rule),
   propose the appropriate alternative instead of writing prose.
 - Choose the right action: battery 'Service Recommended' → create_upgrade_order
-  (component='battery'); screen_lock/os_up_to_date/disk_encryption failure →
-  open_remediation_ticket; unauthorized or unwanted software (uTorrent, remote
-  control tools) detected → notify_employee (the snapshot row carries employee_id);
-  disk space critically low AND the user can clean it up → notify_employee.
+  (component='battery'); a failing compliance check (screen_lock, os_up_to_date,
+  disk_encryption) → open_remediation_ticket; software in the installed-software
+  inventory that an IT policy would normally forbid (peer-to-peer/file-sharing
+  clients, remote-access tools, unlicensed or unmanaged applications) →
+  notify_employee, using the employee_id on the snapshot row; critically low free
+  disk that the user can fix by cleaning up → notify_employee.
+- For software-based actions, cite the inventory entry (name, version, device_id)
+  as evidence and say in the rationale why it violates policy. If the inventory
+  shows nothing that clearly qualifies, say so instead of proposing an action.
 - Device snapshots include employee_id: use it with notify_employee when the user
   asks to contact or warn a device's user (e.g. unauthorized software found).
 - Snapshots also expose network_info (interface + IP per device) — both
@@ -76,7 +81,7 @@ Tool economy (hard budget):
 - You have at most 6 turns and 4 tool calls per turn. Batch everything you need
   into as few calls as possible.
 - For fleet-wide or filtered questions use query_fleet_snapshot (it supports
-  min_avail_disk_gb, os_version_lt, check, software filters) — ONE call answers
+  min_avail_disk_gib, os_version_lt, check, software filters) — ONE call answers
   "which devices…" questions. Do NOT call query_device_history per device;
   history is only for drilling into a device the snapshot flagged.
 - For 30-day patterns use analyze_time_series_trends — it is pre-computed.
@@ -342,20 +347,16 @@ def _claim_problems(c, idx: dict, pool: set[str]) -> list[str]:
             elif not _values_match(e.value, bucket[e.metric]):
                 problems.append(f"{e.device_id}@{e.collected_at} {e.metric}: claimed "
                                 f"{e.value!r}, tool results say {bucket[e.metric]!r}")
-    # numbers asserted with no evidence refs: must match an actual numeric value
-    # in the tool payloads (same value, or the same percentage as a fraction)
+    # numbers asserted with no evidence refs: only trustworthy anchors are the
+    # tool-level aggregates (count / total_matching) — a match against ANY
+    # payload field (e.g. a battery cycle count) would validate invented claims
     if not c.evidence:
         nums = re.findall(r"\d+(?:\.\d+)?", c.claim)
         if nums:
-            values: list[float] = []
-            for bucket in idx.values():
-                for v in bucket.values():
-                    if isinstance(v, (int, float)) and not isinstance(v, bool):
-                        values.append(float(v))
-            ok = any(
-                any(abs(n - v) <= abs(v) * 0.01 or abs(n - v * 100) <= abs(v * 100) * 0.01
-                    for v in values)
-                for n in (float(x) for x in nums))
+            aggs = idx.get(("__agg__", ""), {})
+            values = [float(v) for v in aggs.values()
+                      if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            ok = any(abs(float(n) - v) <= abs(v) * 0.01 for n in nums for v in values)
             if not ok:
                 problems.append(f"numeric claim without any evidence ref: {c.claim[:120]}")
     return problems

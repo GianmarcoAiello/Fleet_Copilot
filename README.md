@@ -149,6 +149,11 @@ Honest caveats from the run:
   flag is a secondary signal.
 - The HITL decision is one per gate invocation (all proposed actions share it);
   the **Pending actions** tab allows approving/rejecting each action separately.
+- The planner/analyst prompts were iterated against failures of this QA set, so
+  the reported scores are a development measure, not a held-out one.
+- **Run-to-run variance**: the same model at temperature 0 scored 38/45 and
+  30/45 on grounded_qa across two runs — a single 100-question run with an LLM
+  judge carries several points of noise.
 - Raw results per case: `evals/qa100_results.json` (the runner is resume-safe).
 
 ---
@@ -160,7 +165,7 @@ src/
   graph/nodes.py      planner, analyst (ReAct), verifier, HITL gate, formatter
   graph/state.py      typed state: plan, messages, tool_outputs, claims, proposals
   tools/read_tools.py 4 read tools + 4 action tools (tenant injected, never LLM-settable)
-  db/loader.py        NDJSON → DuckDB schema; queries; actions/audit (append-only)
+  db/loader.py        NDJSON → DuckDB schema; queries; actions/audit (append-only by convention)
 webui.py              stdlib HTTP server + SSE streaming (no web framework)
 cli.py / run_once.py / run_hitl.py / actions_cli.py
 evals/                deterministic suite + 100-QA live runner
@@ -242,7 +247,7 @@ parameter the model can set.
    HITL gate is pure (nothing writes before the interrupt, so a resume can
    never duplicate an audit row) and never asks the human to approve an action
    on a device no tool result ever confirmed.
-4. **Audit trail** — append-only `audit_log`: proposal → approved/refused,
+4. **Audit trail** — `audit_log` is append-only by convention (no DB constraint): proposal → approved/refused,
    with args + evidence JSON and approver id; visible in the web UI and
    `actions_cli.py`.
 
@@ -271,6 +276,10 @@ parameter the model can set.
 
 ## Deliberately left out (prototype scope)
 
+- **State persistence**: `data/fleet.duckdb` is rebuilt from the NDJSON on first
+  run (and whenever an expected table is missing, e.g. after a schema change),
+  which resets `actions` and `audit_log`. In production, keep telemetry and state
+  in separate stores, or persist the DB volume and migrate additively.
 - **No web auth / multi-user**: the UI binds to 127.0.0.1 and trusts the
   tenant selector; real deployment needs SSO + per-user tenant binding.
 - **In-memory HITL checkpointing** (`MemorySaver`): parked threads don't

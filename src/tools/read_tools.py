@@ -96,7 +96,7 @@ def analyze_time_series_trends(
     if trend == "compliance":
         # pre-computed pass -> fail transitions with first fail date — the model
         # cannot be asked to diff 25k chars of raw fail rows
-        return json.dumps({trend: "compliance", **_repo.compliance_transitions(t)},
+        return json.dumps({"trend": "compliance", **_repo.compliance_transitions(t)},
                           default=str)
     if trend == "software":
         return json.dumps({"trend": trend, "rows": _repo.software_events(t)}, default=str)
